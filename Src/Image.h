@@ -52,6 +52,16 @@ namespace Viewer
 class Image : public tLink<Image>
 {
 public:
+	enum class MultiFrameType
+	{
+		None,
+		Animation,		// Standard animation frames (GIF, APNG, WEBP etc)
+		Mipmaps,		// Mipmap levels
+		Cubemap,		// Cubemap faces
+		TextureArray,	// KTX texture array layers
+		Volume3D		// 3D texture slices
+	};
+
 	Image();
 
 	// These constructors do not actually load the image, but Load() may be called at any point afterwards.
@@ -83,6 +93,14 @@ public:
 	bool FramePlayRev					= false;
 	bool FramePlayLooping				= true;
 	int FrameNum						= 0;
+	
+	// For KTX Array Layer navigation (separate from mipmap navigation)
+	int ArrayLayerNum					= 0;		// Current array layer (0-based)
+	int MaxArrayLayers					= 1;		// Total number of array layers available
+
+	// For dual navigation (array layer + mip) on KTX texture arrays.
+	int MipLevelNum						= 0;       // Current mip level (0-based) when navigating texture arrays.
+	int MaxMipLevels					= 1;       // Total mip levels for array texture (queried lazily).
 
 	bool Load(const tString& filename, bool loadParamsFromConfig = true);
 	bool Load(bool loadParamsFromConfig = true);																		// Load into main memory.
@@ -111,6 +129,21 @@ public:
 
 	int GetNumFrames() const																							{ return Pictures.Count(); }
 	int GetNumPictures() const																							{ return Pictures.Count(); }
+	MultiFrameType GetMultiFrameType() const																			{ return MFT; }
+	
+	// Array Layer navigation methods
+	int GetNumArrayLayers() const																						{ return MaxArrayLayers; }
+	int GetCurrentArrayLayer() const																					{ return ArrayLayerNum; }
+	void SetArrayLayer(int layer);
+	int GetNumMipLevels() const													{ return MaxMipLevels; }
+	int GetCurrentMipLevel() const												{ return MipLevelNum; }
+	void SetMipLevel(int mipLevel);
+
+	// Retrieves raw RGBA8 pixels for a given array layer + mip level without
+	// modifying the current displayed Picture list. Caller takes ownership of
+	// returned pixel buffer and must delete[] it. Returns false on failure.
+	bool GetArrayLayerMipPixels(int arrayLayer, int mipLevel, tPixel4b*& outPixels, int& outWidth, int& outHeight);
+	void ApplyArrayLayerOverlay();
 
 	bool IsOpaque() const;
 	bool Unload(bool force = false);
@@ -121,6 +154,11 @@ public:
 	// texture and ID will be the alt image's. Returns 0 (invalid id) if there was a problem.
 	uint64 Bind();
 	void Unbind();
+	void InvalidateTexture();  // Force texture reload on next Bind()
+	void BackupOriginalArrayLayerData();   // Backup original image data before array layer modification
+	void RestoreOriginalArrayLayerData();  // Restore original image data
+	bool LoadArrayLayerFromKTX(int arrayLayer);  // Load specific array layer from KTX file
+	bool LoadArrayLayerMipFromKTX(int arrayLayer, int mipLevel); // Load specific array layer + mip level
 	int GetWidth() const;
 	int GetHeight() const;
 	int GetArea() const;
@@ -131,7 +169,15 @@ public:
 	// The primary one is the first one.
 	tImage::tPicture* GetPrimaryPic() const																				{ return Pictures.First(); }
 	tImage::tPicture* GetFirstPic() const																				{ return Pictures.First(); }
-	tImage::tPicture* GetCurrentPic() const																				{ tImage::tPicture* pic = Pictures.First(); for (int i = 0; i < FrameNum; i++) pic = pic ? pic->Next() : nullptr; return pic; }
+	tImage::tPicture* GetCurrentPic() const																				
+	{ 
+		// For lazy-loaded TextureArrays, we only have the current layer loaded, so use FrameNum=0
+		// For regular multi-frame images, use FrameNum to navigate through frames
+		tImage::tPicture* pic = Pictures.First(); 
+		for (int i = 0; i < FrameNum; i++) 
+			pic = pic ? pic->Next() : nullptr; 
+		return pic;
+	}
 	const tList<tImage::tPicture>& GetPictures() const																	{ return Pictures; }
 
 	// Functions that edit and cause dirty flag to be set. Functions that return a bool will return false if the image
@@ -343,6 +389,16 @@ private:
 
 	float LoadedTime = -1.0f;
 	bool Dirty = false;
+	MultiFrameType MFT = MultiFrameType::None;
+
+	// Instance-level KTX cache (safer than static)
+	tString CachedKTXFilename;
+	tImage::tImageKTX* CachedKTXImage = nullptr;
+
+	// Array Layer backup data to restore original content
+	tList<tImage::tPicture> OriginalPictures;  // Backup of original image data
+	tImage::tPicture OriginalAltPicture;       // Backup of original alt picture
+	bool ArrayLayerBackupExists = false;
 
 	// Undo / Redo
 	Undo::Stack UndoStack;

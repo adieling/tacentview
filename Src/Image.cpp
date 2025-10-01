@@ -24,6 +24,7 @@
 #include <Math/tRandom.h>
 #include "Image.h"
 #include "Config.h"
+#include <vector>
 using namespace tStd;
 using namespace tSystem;
 using namespace tImage;
@@ -93,6 +94,14 @@ Image::~Image()
 		ThumbnailNumThreadsRunning--;
 		tiClampMin(ThumbnailNumThreadsRunning, 0);
 	}
+
+	// Clean up KTX cache
+	if (CachedKTXImage)
+	{
+		delete CachedKTXImage;
+		CachedKTXImage = nullptr;
+	}
+	CachedKTXFilename.Clear();
 
 	// Free GPU image mem and texture IDs.
 	Unload(true);
@@ -209,6 +218,12 @@ bool Image::Load(bool loadParamsFromConfig)
 				tPicture* picture = new tPicture(frame, true);
 				Pictures.Append(picture);
 			}
+			
+			if (numFrames > 1)
+				MFT = MultiFrameType::Animation;
+			else
+				MFT = MultiFrameType::None;
+				
 			success = true;
 			break;
 		}
@@ -228,6 +243,7 @@ bool Image::Load(bool loadParamsFromConfig)
 
 			tPicture* picture = new tPicture(width, height, pixels, false);
 			Pictures.Append(picture);
+			MFT = MultiFrameType::None;
 			success = true;
 			break;
 		}
@@ -273,6 +289,12 @@ bool Image::Load(bool loadParamsFromConfig)
 				tPicture* picture = new tPicture(frame, true);
 				Pictures.Append(picture);
 			}
+			
+			if (numFrames > 1)
+				MFT = MultiFrameType::Animation;
+			else
+				MFT = MultiFrameType::None;
+				
 			success = true;
 			break;
 		}
@@ -315,6 +337,13 @@ bool Image::Load(bool loadParamsFromConfig)
 				tPicture* picture = new tPicture(frame, true);
 				Pictures.Append(picture);
 			}
+			
+			// ICO files can have multiple icon sizes, treat as frames
+			if (numFrames > 1)
+				MFT = MultiFrameType::Animation; // Could be MultiFrameType::IconSizes if we want to be specific
+			else
+				MFT = MultiFrameType::None;
+				
 			success = true;
 			break;
 		}
@@ -954,6 +983,72 @@ int Image::GetMemSizeBytes() const
 
 void Image::MultiSurfacePopulatePictures(const tBaseImage& img)
 {
+	// Check if this is a KTX texture array or 3D volume
+	const tImage::tImageKTX* ktx = dynamic_cast<const tImage::tImageKTX*>(&img);
+	if (ktx)
+	{
+		// Some builds appear to not expose IsTextureArray/GetNumArrayLayers in this translation unit (possibly due to
+		// include-order or macro issues). To be robust we instantiate a temporary loader to re-query.
+		int numImages = ktx->GetNumImages();
+		int numMipmaps = ktx->GetNumMipmapLevels();
+		int numArrayLayers = 1;
+		bool isTextureArray = false;
+		{
+			// Create a disposable copy to access metadata guaranteed in header.
+			// We re-load from filename to be certain.
+			if (!ktx->Filename.IsEmpty())
+			{
+				tImageKTX temp;
+				if (temp.Load(ktx->Filename))
+				{
+					numArrayLayers = temp.IsTextureArray() ? temp.GetNumArrayLayers() : 1;
+					isTextureArray = temp.IsTextureArray();
+				}
+			}
+		}
+		printf("MultiSurface Debug: KTX detected (Images=%d MipLevels=%d ArrayLayers=%d IsArray=%s)\n",
+			numImages, numMipmaps, numArrayLayers, isTextureArray ? "Yes" : "No");
+
+		if (isTextureArray && (numArrayLayers > 1))
+		{
+			MFT = MultiFrameType::TextureArray;
+			MaxArrayLayers = numArrayLayers;
+			ArrayLayerNum = 0;
+			// Initialize mip level metadata for dual navigation.
+			MaxMipLevels = ktx->GetNumMipmapLevels();
+			MipLevelNum = 0;
+			printf("  -> TextureArray: %d array layers. Preparing lazy load.\n", MaxArrayLayers);
+
+			// Create cache loader once.
+			if (!CachedKTXImage)
+			{
+				CachedKTXImage = new tImageKTX();
+				if (!CachedKTXImage->Load(ktx->Filename))
+				{
+					printf("  -> Failed to cache KTX file for array navigation. Reverting to single-layer.\n");
+					delete CachedKTXImage; CachedKTXImage = nullptr;
+					MFT = MultiFrameType::None;
+					MaxArrayLayers = 1;
+				}
+				else
+					CachedKTXFilename = ktx->Filename;
+			}
+
+			// Initial layer load.
+			if (LoadArrayLayerFromKTX(0))
+				printf("  -> Loaded initial array layer 1/%d.\n", MaxArrayLayers);
+			else
+				printf("  -> Failed to load initial array layer 0.\n");
+
+			return; // Done handling texture array.
+		}
+
+		// Not a texture array.
+		MaxArrayLayers = 1;
+		ArrayLayerNum = 0;
+		printf("  -> Not a texture array.\n");
+	}
+
 	if (img.IsCubemap())
 	{
 		// Cubemaps sides use a left-hand coordinate system with +Z facing the front and +Y up. We want the front (+Z)
@@ -977,6 +1072,9 @@ void Image::MultiSurfacePopulatePictures(const tBaseImage& img)
 			}
 		}
 		MultiSurfaceCreateAltCubemapPicture(layers);
+		// Only set to Cubemap if not already set to TextureArray or Volume3D
+		if (MFT != MultiFrameType::TextureArray && MFT != MultiFrameType::Volume3D)
+			MFT = MultiFrameType::Cubemap;
 	}
 	else
 	{
@@ -988,7 +1086,18 @@ void Image::MultiSurfacePopulatePictures(const tBaseImage& img)
 			Pictures.Append(new tPicture(layer->Width, layer->Height, (tPixel4b*)layer->Data, true));
 
 		if (img.IsMipmapped())
+		{
 			MultiSurfaceCreateAltMipmapPicture(layers);
+			// Only set to Mipmaps if not already set to TextureArray or Volume3D
+			if (MFT != MultiFrameType::TextureArray && MFT != MultiFrameType::Volume3D)
+				MFT = MultiFrameType::Mipmaps;
+		}
+		else
+		{
+			// Only set to None if not already set to TextureArray or Volume3D
+			if (MFT != MultiFrameType::TextureArray && MFT != MultiFrameType::Volume3D)
+				MFT = MultiFrameType::None;
+		}
 	}
 }
 
@@ -1636,6 +1745,219 @@ void Image::Unbind()
 }
 
 
+void Image::InvalidateTexture()
+{
+	// Force texture reload on next Bind() by deleting current textures
+	Unbind();
+}
+
+
+void Image::BackupOriginalArrayLayerData()
+{
+	if (ArrayLayerBackupExists)
+		return;  // Already backed up
+	
+	printf("Backing up original array layer data\n");
+	
+	// Clear any existing backup
+	OriginalPictures.Clear();
+	OriginalAltPicture.Clear();
+	
+	// Backup all pictures
+	for (tPicture* pic = Pictures.First(); pic; pic = pic->Next())
+	{
+		if (pic->IsValid())
+		{
+			tImage::tPicture* backupPic = new tImage::tPicture(*pic);  // Copy constructor
+			OriginalPictures.Append(backupPic);
+		}
+	}
+	
+	// Backup alt picture if it exists
+	if (AltPicture.IsValid())
+	{
+		OriginalAltPicture = AltPicture;  // Copy
+	}
+	
+	ArrayLayerBackupExists = true;
+}
+
+
+void Image::RestoreOriginalArrayLayerData()
+{
+	if (!ArrayLayerBackupExists)
+		return;  // No backup exists
+	
+	printf("Restoring original array layer data\n");
+	
+	// Restore all pictures
+	tImage::tPicture* originalPic = OriginalPictures.First();
+	for (tPicture* pic = Pictures.First(); pic && originalPic; pic = pic->Next(), originalPic = originalPic->Next())
+	{
+		if (pic->IsValid() && originalPic->IsValid())
+		{
+			// Copy pixel data back
+			int width = pic->GetWidth();
+			int height = pic->GetHeight();
+			if (width == originalPic->GetWidth() && height == originalPic->GetHeight())
+			{
+				for (int y = 0; y < height; y++)
+				{
+					for (int x = 0; x < width; x++)
+					{
+						tPixel4b originalPixel = originalPic->GetPixel(x, y);
+						pic->SetPixel(x, y, originalPixel);
+					}
+				}
+			}
+		}
+	}
+	
+	// Restore alt picture if it exists
+	if (AltPicture.IsValid() && OriginalAltPicture.IsValid())
+	{
+		AltPicture = OriginalAltPicture;  // Copy back
+	}
+}
+
+
+bool Image::LoadArrayLayerFromKTX(int arrayLayer)
+{
+	if (arrayLayer < 0 || Filename.IsEmpty())
+		return false;
+	if (CachedKTXFilename != Filename || !CachedKTXImage)
+	{
+		if (CachedKTXImage) { delete CachedKTXImage; CachedKTXImage = nullptr; }
+		CachedKTXImage = new tImageKTX();
+		if (!CachedKTXImage->Load(Filename))
+		{ delete CachedKTXImage; CachedKTXImage = nullptr; return false; }
+		CachedKTXFilename = Filename;
+
+		// Initialize mip metadata for dual navigation.
+		if (CachedKTXImage->IsMipmapped())
+		{
+			MaxMipLevels = CachedKTXImage->GetNumMipmapLevels();
+			if (MipLevelNum >= MaxMipLevels) MipLevelNum = MaxMipLevels - 1;
+		}
+		else
+		{
+			MaxMipLevels = 1;
+			MipLevelNum = 0;
+		}
+	}
+	// Extract array layer via new API.
+	tPixel4b* pixels = nullptr; int w=0,h=0;
+	if (!CachedKTXImage->ExtractArrayLayerBaseRGBA(arrayLayer, pixels, w, h) || !pixels)
+		return false;
+	while (!Pictures.IsEmpty()) { auto* p = Pictures.First(); Pictures.Remove(p); delete p; }
+	tPicture* pic = new tPicture();
+	pic->Set(w, h, pixels, true); // steal
+	Pictures.Append(pic);
+	FrameNum = 0;
+	return true;
+}
+
+
+bool Image::LoadArrayLayerMipFromKTX(int arrayLayer, int mipLevel)
+{
+    if (arrayLayer < 0 || mipLevel < 0 || Filename.IsEmpty())
+        return false;
+    if (CachedKTXFilename != Filename || !CachedKTXImage)
+    {
+        if (CachedKTXImage) { delete CachedKTXImage; CachedKTXImage = nullptr; }
+        CachedKTXImage = new tImageKTX();
+        if (!CachedKTXImage->Load(Filename))
+        { delete CachedKTXImage; CachedKTXImage = nullptr; return false; }
+        CachedKTXFilename = Filename;
+        MaxMipLevels = CachedKTXImage->IsMipmapped() ? CachedKTXImage->GetNumMipmapLevels() : 1;
+        if (mipLevel >= MaxMipLevels) mipLevel = MaxMipLevels - 1;
+    }
+
+    tPixel4b* pixels = nullptr; int w=0,h=0;
+    bool gotExact = CachedKTXImage->ExtractArrayLayerRGBA(arrayLayer, mipLevel, pixels, w, h);
+    if (!gotExact || !pixels)
+    {
+        // Fallback: load base then downsample (legacy path)
+        if (pixels) { delete[] pixels; pixels = nullptr; }
+        if (!CachedKTXImage->ExtractArrayLayerBaseRGBA(arrayLayer, pixels, w, h) || !pixels)
+            return false;
+        if (mipLevel > 0)
+        {
+            int targetW = tMax(1, w >> mipLevel);
+            int targetH = tMax(1, h >> mipLevel);
+            int numTarget = targetW * targetH;
+            tPixel4b* mipPixels = new tPixel4b[numTarget];
+            for (int y = 0; y < targetH; y++)
+            {
+                for (int x = 0; x < targetW; x++)
+                {
+                    int srcX0 = x << mipLevel;
+                    int srcY0 = y << mipLevel;
+                    int srcX1 = tMin(srcX0 + (1<<mipLevel), w);
+                    int srcY1 = tMin(srcY0 + (1<<mipLevel), h);
+                    uint32 r=0,g=0,b=0,a=0; int count=0;
+                    for (int sy = srcY0; sy < srcY1; sy++)
+                        for (int sx = srcX0; sx < srcX1; sx++)
+                        { const tPixel4b& sp = pixels[sy*w + sx]; r+=sp.R; g+=sp.G; b+=sp.B; a+=sp.A; count++; }
+                    if (count == 0) count = 1;
+                    mipPixels[y*targetW + x] = tPixel4b(uint8(r/count), uint8(g/count), uint8(b/count), uint8(a/count));
+                }
+            }
+            delete[] pixels; pixels = mipPixels; w = targetW; h = targetH;
+        }
+    }
+
+    while (!Pictures.IsEmpty()) { auto* p = Pictures.First(); Pictures.Remove(p); delete p; }
+    tPicture* pic = new tPicture();
+    pic->Set(w, h, pixels, true);
+    Pictures.Append(pic);
+    FrameNum = 0;
+    return true;
+}
+
+
+bool Image::GetArrayLayerMipPixels(int arrayLayer, int mipLevel, tPixel4b*& outPixels, int& outWidth, int& outHeight)
+{
+	outPixels = nullptr; outWidth = outHeight = 0;
+	if (arrayLayer < 0 || mipLevel < 0 || Filename.IsEmpty())
+		return false;
+	// Ensure cache primed (but don't change current displayed state here).
+	if (CachedKTXFilename != Filename || !CachedKTXImage)
+	{
+		if (CachedKTXImage) { delete CachedKTXImage; CachedKTXImage = nullptr; }
+		CachedKTXImage = new tImageKTX();
+		if (!CachedKTXImage->Load(Filename))
+		{ delete CachedKTXImage; CachedKTXImage = nullptr; return false; }
+		CachedKTXFilename = Filename;
+		MaxMipLevels = CachedKTXImage->IsMipmapped() ? CachedKTXImage->GetNumMipmapLevels() : 1;
+	}
+	if (mipLevel >= MaxMipLevels) return false;
+	if (!CachedKTXImage->ExtractArrayLayerRGBA(arrayLayer, mipLevel, outPixels, outWidth, outHeight) || !outPixels)
+		return false;
+	return true;
+}
+
+
+void Image::SetMipLevel(int mipLevel)
+{
+	if (MFT != MultiFrameType::TextureArray && MFT != MultiFrameType::Volume3D)
+		return;
+	if (mipLevel < 0) mipLevel = 0;
+	if (mipLevel >= MaxMipLevels) mipLevel = MaxMipLevels - 1;
+	if (mipLevel == MipLevelNum) return;
+	MipLevelNum = mipLevel;
+	printf("SetMipLevel: Changed to mip %d/%d (layer %d)\n", MipLevelNum+1, MaxMipLevels, ArrayLayerNum+1);
+	if (MFT == MultiFrameType::TextureArray && !Filename.IsEmpty())
+	{
+		if (LoadArrayLayerMipFromKTX(ArrayLayerNum, MipLevelNum))
+		{
+			InvalidateTexture();
+			Dirty = true;
+		}
+	}
+}
+
+
 void Image::BindLayers(const tList<tLayer>& layers, uint texID)
 {
 	if (layers.IsEmpty())
@@ -2042,4 +2364,253 @@ void Image::UpdatePlaying(float dt)
 		tMath::tiClampMin(frameDuration, remainder);
 		FrameCurrCountdown = frameDuration - remainder;
 	}
+}
+
+
+void Image::SetArrayLayer(int layer)
+{
+	// Only allow array layer changes for TextureArray and Volume3D types
+	if ((MFT != MultiFrameType::TextureArray) && (MFT != MultiFrameType::Volume3D))
+		return;
+
+	// Clamp layer to valid range
+	if (layer < 0)
+		layer = 0;
+	if (layer >= MaxArrayLayers)
+		layer = MaxArrayLayers - 1;
+
+	// Only reload if layer actually changed
+	if (layer == ArrayLayerNum)
+		return;
+
+	ArrayLayerNum = layer;
+	printf("SetArrayLayer: Changed to layer %d/%d\n", ArrayLayerNum + 1, MaxArrayLayers);
+
+	// For KTX TextureArrays, use lazy loading to load only the requested layer
+	if (MFT == MultiFrameType::TextureArray && !Filename.IsEmpty())
+	{
+		printf("Array layer navigation: lazy loading layer %d of %d\n", ArrayLayerNum + 1, MaxArrayLayers);
+		
+		// Load the specific array layer on demand
+		if (LoadArrayLayerFromKTX(ArrayLayerNum))
+		{
+			printf("Successfully lazy-loaded array layer %d\n", ArrayLayerNum + 1);
+			InvalidateTexture();
+			Dirty = true;
+		}
+		else
+		{
+			printf("Failed to load array layer %d, trying to find next valid layer\n", ArrayLayerNum + 1);
+			
+			// Search for a valid layer nearby
+			bool foundValid = false;
+			for (int searchOffset = 1; searchOffset <= 10 && (ArrayLayerNum + searchOffset) < MaxArrayLayers; searchOffset++)
+			{
+				int searchLayer = ArrayLayerNum + searchOffset;
+				if (LoadArrayLayerFromKTX(searchLayer))
+				{
+					printf("Found valid array layer %d instead\n", searchLayer + 1);
+					ArrayLayerNum = searchLayer;
+					foundValid = true;
+					break;
+				}
+			}
+			
+			if (foundValid)
+			{
+				InvalidateTexture();
+				Dirty = true;
+			}
+			else
+			{
+				printf("No valid array layer found near layer %d\n", ArrayLayerNum + 1);
+			}
+		}
+		return;
+	}
+
+	// If we get here, no KTX TextureArray - use fallback
+	InvalidateTexture();
+}
+
+
+void Image::ApplyArrayLayerOverlay()
+{
+	// Create very obvious visual changes that are clearly different for each array layer
+	
+	if (Pictures.IsEmpty())
+		return;
+		
+	printf("ApplyArrayLayerOverlay: Creating dramatic visual changes for array layer %d\n", ArrayLayerNum);
+	
+	// Apply dramatic changes to ALL mipmap levels for maximum visibility
+	for (tPicture* pic = Pictures.First(); pic; pic = pic->Next())
+	{
+		int width = pic->GetWidth();
+		int height = pic->GetHeight();
+		
+		if (width <= 0 || height <= 0)
+			continue;
+		
+		// Define very distinct visual treatment for each array layer
+		tPixel4b overlayColor;
+		tPixel4b borderColor;
+		
+		switch (ArrayLayerNum % 8)
+		{
+			case 0: // Red layer - heavy red tint
+				overlayColor = tPixel4b(255, 100, 100, 128);
+				borderColor = tPixel4b(255, 0, 0, 255);
+				break;
+			case 1: // Green layer - heavy green tint  
+				overlayColor = tPixel4b(100, 255, 100, 128);
+				borderColor = tPixel4b(0, 255, 0, 255);
+				break;
+			case 2: // Blue layer - heavy blue tint
+				overlayColor = tPixel4b(100, 150, 255, 128);
+				borderColor = tPixel4b(0, 100, 255, 255);
+				break;
+			case 3: // Yellow layer - heavy yellow tint
+				overlayColor = tPixel4b(255, 255, 100, 128);
+				borderColor = tPixel4b(255, 255, 0, 255);
+				break;
+			case 4: // Magenta layer - heavy magenta tint
+				overlayColor = tPixel4b(255, 100, 255, 128);
+				borderColor = tPixel4b(255, 0, 255, 255);
+				break;
+			case 5: // Cyan layer - heavy cyan tint
+				overlayColor = tPixel4b(100, 255, 255, 128);
+				borderColor = tPixel4b(0, 255, 255, 255);
+				break;
+			case 6: // Orange layer - heavy orange tint
+				overlayColor = tPixel4b(255, 180, 100, 128);
+				borderColor = tPixel4b(255, 140, 0, 255);
+				break;
+			default: // Purple layer - heavy purple tint
+				overlayColor = tPixel4b(200, 100, 255, 128);
+				borderColor = tPixel4b(160, 0, 255, 255);
+				break;
+		}
+		
+		// Apply heavy color overlay to ENTIRE image for maximum visibility
+		for (int y = 0; y < height; y++)
+		{
+			for (int x = 0; x < width; x++)
+			{
+				tPixel4b originalPixel = pic->GetPixel(x, y);
+				
+				// Strong color blending for dramatic effect
+				int newR = (originalPixel.R + overlayColor.R) / 2;
+				int newG = (originalPixel.G + overlayColor.G) / 2;  
+				int newB = (originalPixel.B + overlayColor.B) / 2;
+				
+				pic->SetPixel(x, y, tPixel4b(uint8(newR), uint8(newG), uint8(newB), originalPixel.A));
+			}
+		}
+		
+		// Add very thick borders for extra visibility
+		int borderSize = tMath::tMax(10, width / 20);
+		
+		// Top border
+		for (int y = 0; y < borderSize && y < height; y++)
+		{
+			for (int x = 0; x < width; x++)
+			{
+				pic->SetPixel(x, y, borderColor);
+			}
+		}
+		
+		// Bottom border  
+		for (int y = height - borderSize; y < height; y++)
+		{
+			if (y >= 0)
+			{
+				for (int x = 0; x < width; x++)
+				{
+					pic->SetPixel(x, y, borderColor);
+				}
+			}
+		}
+		
+		// Left border
+		for (int x = 0; x < borderSize && x < width; x++)
+		{
+			for (int y = 0; y < height; y++)
+			{
+				pic->SetPixel(x, y, borderColor);
+			}
+		}
+		
+		// Right border
+		for (int x = width - borderSize; x < width; x++)
+		{
+			if (x >= 0)
+			{
+				for (int y = 0; y < height; y++)
+				{
+					pic->SetPixel(x, y, borderColor);
+				}
+			}
+		}
+		
+		// Add big layer number display
+		int numberArea = tMath::tMax(60, width / 8);
+		
+		// Black background for number
+		for (int y = 20; y < 20 + numberArea && y < height; y++)
+		{
+			for (int x = 20; x < 20 + numberArea && x < width; x++)
+			{
+				pic->SetPixel(x, y, tPixel4b(0, 0, 0, 255));
+			}
+		}
+		
+		// White number - draw big digits
+		int digitSize = numberArea / 8;
+		int startX = 30;
+		int startY = 30;
+		
+		// Draw simple digit pattern for array layer number
+		int displayDigits = tMath::tMin(ArrayLayerNum, 99); // Max 99 for display
+		
+		// Draw tens digit
+		if (displayDigits >= 10)
+		{
+			int tens = displayDigits / 10;
+			for (int i = 0; i < tens && i < 9; i++)
+			{
+				for (int dy = 0; dy < digitSize; dy++)
+				{
+					for (int dx = 0; dx < digitSize/2; dx++)
+					{
+						int px = startX + i * (digitSize + 2) + dx;
+						int py = startY + dy;
+						if (px < width && py < height)
+							pic->SetPixel(px, py, tPixel4b::white);
+					}
+				}
+			}
+		}
+		
+		// Draw units digit  
+		int units = displayDigits % 10;
+		int unitsX = startX + (displayDigits >= 10 ? digitSize * 2 : 0);
+		for (int i = 0; i < units; i++)
+		{
+			for (int dy = 0; dy < digitSize; dy++)
+			{
+				for (int dx = 0; dx < digitSize/2; dx++)
+				{
+					int px = unitsX + i * (digitSize/3 + 1) + dx;
+					int py = startY + digitSize + 5 + dy;
+					if (px < width && py < height)
+						pic->SetPixel(px, py, tPixel4b::white);
+				}
+			}
+		}
+		
+		printf("Applied dramatic overlay to mipmap %dx%d for array layer %d\n", width, height, ArrayLayerNum);
+	}
+	
+	printf("ApplyArrayLayerOverlay: Applied DRAMATIC visual changes for array layer %d\n", ArrayLayerNum);
 }

@@ -202,6 +202,90 @@ namespace Viewer
 	tItList<Image> ImagesLoadTimeSorted(tListMode::External);		// We don't need static here cuz the list is only used after main().
 	tuint256 ImagesHash												= 0;
 	Image* CurrImage												= nullptr;
+	// Expose preview toggles to other translation units (e.g., Properties window).
+	bool gShowAllMipsUnified = false;
+	bool gShowAllArrayLayers = false;
+	bool gShowLayerMipMatrix = false;
+
+	// Preview slice cache (layer+mip) so we can purge when image changes.
+	struct SlicePreview { int Layer; int Mip; uint TexID; int W; int H; };
+	static ImVector<SlicePreview> gSliceCache;          // Persist across frames; cleared on image switch.
+	static const Image* gSliceCacheImage = nullptr;     // Tracks which image the cache belongs to.
+	static tString gSliceCacheImageFilename;            // Filename snapshot to detect external reload/rename.
+	static uint64 gSliceCacheFileModTime = 0;          // Optional: detect reload of same file.
+
+	// CPU-side decoded pixel cache to avoid re-decoding KTX slices repeatedly.
+	struct SlicePixelCacheEntry
+	{
+		int Layer; int Mip; int W; int H; tPixel4b* Pixels = nullptr; uint64 LastUsed = 0; size_t SizeBytes = 0;
+	};
+	static ImVector<SlicePixelCacheEntry> gSlicePixelCache; // Vector-based cache.
+	static size_t gSlicePixelCacheBytes = 0;
+	static uint64 gSlicePixelCacheTick = 0;
+	static const size_t kMaxSlicePixelCacheBytes = size_t(64) * 1024 * 1024; // 64 MB budget.
+
+	static SlicePixelCacheEntry* FindSlicePixels(int layer, int mip)
+	{
+		for (int i=0; i<gSlicePixelCache.Size; i++)
+		{
+			SlicePixelCacheEntry& e = gSlicePixelCache[i];
+			if (e.Layer == layer && e.Mip == mip)
+			{
+				e.LastUsed = ++gSlicePixelCacheTick;
+				return &e;
+			}
+		}
+		return nullptr;
+	}
+
+	static void TrimSlicePixelCache()
+	{
+		if (gSlicePixelCacheBytes <= kMaxSlicePixelCacheBytes)
+			return;
+		while (gSlicePixelCacheBytes > kMaxSlicePixelCacheBytes && gSlicePixelCache.Size)
+		{
+			int lruIdx = -1; uint64 best = ~uint64(0);
+			for (int i=0; i<gSlicePixelCache.Size; i++)
+			{
+				if (gSlicePixelCache[i].LastUsed < best) { best = gSlicePixelCache[i].LastUsed; lruIdx = i; }
+			}
+			if (lruIdx < 0) break;
+			if (gSlicePixelCache[lruIdx].Pixels)
+			{
+				delete[] gSlicePixelCache[lruIdx].Pixels;
+				gSlicePixelCacheBytes -= gSlicePixelCache[lruIdx].SizeBytes;
+			}
+			gSlicePixelCache.erase(gSlicePixelCache.begin()+lruIdx);
+		}
+	}
+
+	static SlicePixelCacheEntry* DecodeAndCacheSlice(Image* img, int layer, int mip)
+	{
+		tPixel4b* px = nullptr; int w=0, h=0;
+		if (!img->GetArrayLayerMipPixels(layer, mip, px, w, h) || !px)
+			return nullptr;
+		SlicePixelCacheEntry entry; entry.Layer = layer; entry.Mip = mip; entry.W = w; entry.H = h; entry.Pixels = px; entry.SizeBytes = size_t(w)*size_t(h)*4; entry.LastUsed = ++gSlicePixelCacheTick;
+		gSlicePixelCache.push_back(entry);
+		gSlicePixelCacheBytes += entry.SizeBytes;
+		TrimSlicePixelCache();
+		return &gSlicePixelCache.back();
+	}
+
+	void ClearSliceCache()
+	{
+		for (auto& s : gSliceCache)
+			if (s.TexID)
+				glDeleteTextures(1, &s.TexID);
+		gSliceCache.clear();
+		// Also clear pixel cache.
+		for (auto& e : gSlicePixelCache)
+			if (e.Pixels) delete[] e.Pixels;
+		gSlicePixelCache.clear();
+		gSlicePixelCacheBytes = 0;
+		gSliceCacheImage = nullptr;
+		gSliceCacheFileModTime = 0;
+		gSliceCacheImageFilename.Clear();
+	}
 	tString ImageToLoad;
 
 	void LoadAppImages(const tString& assetsDir);
@@ -355,6 +439,7 @@ namespace Viewer
 	inline bool OnNextImage(bool next);
 	inline bool OnLastImage(bool last);
 	inline void OnNextImageFrame(bool next);
+	inline void OnNextArrayLayer(bool next);
 	enum class MoveDir { Right, Left, Up, Down };
 	inline void OnPixelMove(MoveDir);
 	inline void OnUISizeInc(bool inc);
@@ -890,6 +975,27 @@ void Viewer::LoadCurrImage(bool forceReload)
 	tAssert(CurrImage);
 	bool imgJustLoaded = false;
 
+	// If switching to a different Image pointer or filename, purge slice preview cache.
+	if (gSliceCacheImage != CurrImage)
+	{
+		ClearSliceCache();
+		gSliceCacheImage = CurrImage;
+		gSliceCacheFileModTime = 0; // placeholder until proper file mod time utility is integrated.
+	}
+	else
+	{
+		// Same image object. If file reloaded/modified on disk and we force reload, also clear.
+		if (forceReload)
+		{
+			uint64 newMod = 0; // placeholder.
+			if (newMod != gSliceCacheFileModTime)
+			{
+				ClearSliceCache();
+				gSliceCacheFileModTime = newMod;
+			}
+		}
+	}
+
 	if (!CurrImage->IsLoaded())
 	{
 		imgJustLoaded = CurrImage->Load();
@@ -1012,8 +1118,49 @@ void Viewer::OnNextImageFrame(bool next)
 	if (!CurrImage || !CurrImage->IsLoaded() || (CurrImage->GetNumFrames() <= 1))
 		return;
 
+	int oldFrame = CurrImage->FrameNum;
 	CurrImage->Stop();
 	CurrImage->FrameNum = next ? tClampMax(CurrImage->FrameNum+1, CurrImage->GetNumFrames()-1) : tClampMin(CurrImage->FrameNum-1, 0);
+	
+	// Debug output
+	const char* frameTypeName = "Frame";
+	Image::MultiFrameType mft = CurrImage->GetMultiFrameType();
+	switch (mft)
+	{
+		case Image::MultiFrameType::Animation:		frameTypeName = "Animation Frame"; break;
+		case Image::MultiFrameType::Mipmaps:		frameTypeName = "Mipmap Level"; break;
+		case Image::MultiFrameType::Cubemap:		frameTypeName = "Cubemap Face"; break;
+		case Image::MultiFrameType::TextureArray:	frameTypeName = "Array Layer"; break;
+		case Image::MultiFrameType::Volume3D:		frameTypeName = "Volume Slice"; break;
+		default:									frameTypeName = "Frame"; break;
+	}
+	
+	printf("Frame Navigation: %s %d -> %d (Total: %d)\n", 
+		frameTypeName, oldFrame + 1, CurrImage->FrameNum + 1, CurrImage->GetNumFrames());
+}
+
+
+void Viewer::OnNextArrayLayer(bool next)
+{
+	if (!CurrImage || !CurrImage->IsLoaded() || (CurrImage->GetNumArrayLayers() <= 1))
+		return;
+
+	// Only allow for TextureArray and Volume3D types
+	Image::MultiFrameType mft = CurrImage->GetMultiFrameType();
+	if (mft != Image::MultiFrameType::TextureArray && mft != Image::MultiFrameType::Volume3D)
+		return;
+
+	int oldLayer = CurrImage->GetCurrentArrayLayer();
+	int newLayer = next ? 
+		tClampMax(CurrImage->GetCurrentArrayLayer() + 1, CurrImage->GetNumArrayLayers() - 1) : 
+		tClampMin(CurrImage->GetCurrentArrayLayer() - 1, 0);
+	
+	CurrImage->SetArrayLayer(newLayer);
+	
+	// Debug output
+	const char* layerTypeName = (mft == Image::MultiFrameType::Volume3D) ? "Volume Slice" : "Array Layer";
+	printf("Array Layer Navigation: %s %d -> %d (Total: %d)\n", 
+		layerTypeName, oldLayer + 1, CurrImage->GetCurrentArrayLayer() + 1, CurrImage->GetNumArrayLayers());
 }
 
 
@@ -3428,20 +3575,323 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 		ImGui::SetNextWindowSize(tVector2(float(workAreaW), 0.0f), ImGuiCond_Always);
 		ImGui::Begin("Scrubber", nullptr, flagsImgButton);
 
-		ImGui::PushItemWidth(-1);	// Push E
+		// Display multi-frame type information - Frame scrubber always shows mipmaps
+		const char* frameTypeText = "Frame";
+		Image::MultiFrameType mft = CurrImage->GetMultiFrameType();
+		switch (mft)
+		{
+			case Image::MultiFrameType::Animation:		frameTypeText = "Animation Frame"; break;
+			case Image::MultiFrameType::Mipmaps:		frameTypeText = "Mipmap Level"; break;
+			case Image::MultiFrameType::Cubemap:		frameTypeText = "Cubemap Face"; break;
+			case Image::MultiFrameType::TextureArray:	frameTypeText = "Mipmap Level"; break;  // Frame scrubber shows mipmaps even for arrays
+			case Image::MultiFrameType::Volume3D:		frameTypeText = "Mipmap Level"; break;  // Frame scrubber shows mipmaps even for volumes
+			default:									frameTypeText = "Frame"; break;
+		}
+
+		// Show frame type and navigation buttons
+		ImGui::Text("%s:", frameTypeText);
+		ImGui::SameLine();
+		
+		// Previous frame button
+		bool canGoPrev = CurrImage->FrameNum > 0;
+		if (!canGoPrev) ImGui::BeginDisabled();
+		if (ImGui::Button("<##PrevFrame"))
+		{
+			OnNextImageFrame(false);
+		}
+		if (!canGoPrev) ImGui::EndDisabled();
+		ImGui::SameLine();
+		
+		// Frame slider
+		ImGui::PushItemWidth(-200);  // Leave space for buttons
 		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
 		int frmNum = CurrImage->FrameNum + 1;
 		if (ImGui::SliderInt("##ScrubberSlider", &frmNum, 1, CurrImage->GetNumFrames(), "%d", ImGuiSliderFlags_ClampOnInput))
 		{
+			int oldFrame = CurrImage->FrameNum;
 			tMath::tiClamp(frmNum, 1, CurrImage->GetNumFrames());
 			CurrImage->FrameNum = frmNum-1;
+			
+			// Debug output for slider
+			printf("Slider Navigation: %s %d -> %d (Total: %d)\n", 
+				frameTypeText, oldFrame + 1, CurrImage->FrameNum + 1, CurrImage->GetNumFrames());
 		}
 		skipUpdatePlaying = ImGui::IsItemActive();
+		ImGui::SameLine();
+		
+		// Next frame button
+		bool canGoNext = CurrImage->FrameNum < CurrImage->GetNumFrames() - 1;
+		if (!canGoNext) ImGui::BeginDisabled();
+		if (ImGui::Button(">##NextFrame"))
+		{
+			OnNextImageFrame(true);
+		}
+		if (!canGoNext) ImGui::EndDisabled();
 
 		ImGui::PopStyleVar();		// Pop E
 		ImGui::PopItemWidth();
 		ImGui::End();
 	}
+
+	// Array Layer Scrubber (separate from frame scrubber for texture arrays/volumes)
+	// Show even when alt picture is enabled (e.g., "Display All Mipmaps" mode)
+	if
+	(
+		!CropMode && profile.ShowPropsWindow &&
+		profile.ShowFrameScrubber && CurrImage && 
+		(CurrImage->GetMultiFrameType() == Image::MultiFrameType::TextureArray || 
+		 CurrImage->GetMultiFrameType() == Image::MultiFrameType::Volume3D) &&
+		CurrImage->GetNumArrayLayers() > 1
+	)
+	{
+		float scrubOffset = Gutil::GetUIParamScaled(68.0f, 2.5f);  // Below frame scrubber
+		ImGui::SetNextWindowPos(tVector2(0.0f, float(topUIHeight) + float(workAreaH) - scrubOffset));
+		ImGui::SetNextWindowSize(tVector2(float(workAreaW), 0.0f), ImGuiCond_Always);
+		ImGui::Begin("ArrayScrubber", nullptr, flagsImgButton);
+
+		// Array layer type text
+		const char* layerTypeText = (CurrImage->GetMultiFrameType() == Image::MultiFrameType::Volume3D) ? "Volume Slice" : "Array Layer";
+		
+		ImGui::Text("%s:", layerTypeText);
+		ImGui::SameLine();
+		
+		// Previous layer button
+		bool canGoPrevLayer = CurrImage->GetCurrentArrayLayer() > 0;
+		if (!canGoPrevLayer) ImGui::BeginDisabled();
+		if (ImGui::Button("<##PrevLayer"))
+		{
+			OnNextArrayLayer(false);
+		}
+		if (!canGoPrevLayer) ImGui::EndDisabled();
+		ImGui::SameLine();
+		
+		// Array layer slider
+		ImGui::PushItemWidth(-200);  // Leave space for buttons
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
+		int layerNum = CurrImage->GetCurrentArrayLayer() + 1;
+		if (ImGui::SliderInt("##ArrayScrubberSlider", &layerNum, 1, CurrImage->GetNumArrayLayers(), "%d", ImGuiSliderFlags_ClampOnInput))
+		{
+			int oldLayer = CurrImage->GetCurrentArrayLayer();
+			tMath::tiClamp(layerNum, 1, CurrImage->GetNumArrayLayers());
+			CurrImage->SetArrayLayer(layerNum - 1);
+			
+			// Debug output for array layer slider
+			printf("Array Layer Navigation: %s %d -> %d (Total: %d)\n", 
+				layerTypeText, oldLayer + 1, CurrImage->GetCurrentArrayLayer() + 1, CurrImage->GetNumArrayLayers());
+		}
+		ImGui::SameLine();
+		
+		// Next layer button
+		bool canGoNextLayer = CurrImage->GetCurrentArrayLayer() < CurrImage->GetNumArrayLayers() - 1;
+		if (!canGoNextLayer) ImGui::BeginDisabled();
+		if (ImGui::Button(">##NextLayer"))
+		{
+			OnNextArrayLayer(true);
+		}
+		if (!canGoNextLayer) ImGui::EndDisabled();
+
+		// Mip slider (only for texture arrays with multiple mip levels)
+		if (CurrImage->GetNumMipLevels() > 1)
+		{
+			ImGui::Separator();
+			ImGui::Text("Mip Level:");
+			ImGui::SameLine();
+			bool canPrevMip = CurrImage->GetCurrentMipLevel() > 0;
+			if (!canPrevMip) ImGui::BeginDisabled();
+			if (ImGui::Button("<##PrevMip"))
+			{
+				CurrImage->SetMipLevel(CurrImage->GetCurrentMipLevel()-1);
+			}
+			if (!canPrevMip) ImGui::EndDisabled();
+			ImGui::SameLine();
+			ImGui::PushItemWidth(-200);
+			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
+			int mipNum = CurrImage->GetCurrentMipLevel()+1;
+			if (ImGui::SliderInt("##MipScrubberSlider", &mipNum, 1, CurrImage->GetNumMipLevels(), "%d", ImGuiSliderFlags_ClampOnInput))
+			{
+				int oldMip = CurrImage->GetCurrentMipLevel();
+				tMath::tiClamp(mipNum, 1, CurrImage->GetNumMipLevels());
+				CurrImage->SetMipLevel(mipNum-1);
+				printf("Mip Navigation: %d -> %d (Total: %d)\n", oldMip+1, CurrImage->GetCurrentMipLevel()+1, CurrImage->GetNumMipLevels());
+			}
+			ImGui::SameLine();
+			bool canNextMip = CurrImage->GetCurrentMipLevel() < CurrImage->GetNumMipLevels()-1;
+			if (!canNextMip) ImGui::BeginDisabled();
+			if (ImGui::Button(">##NextMip"))
+			{
+				CurrImage->SetMipLevel(CurrImage->GetCurrentMipLevel()+1);
+			}
+			if (!canNextMip) ImGui::EndDisabled();
+			ImGui::SameLine();
+			ImGui::Checkbox("All Mips", &gShowAllMipsUnified);
+			if (CurrImage->GetNumArrayLayers() > 1)
+			{
+				ImGui::SameLine();
+				ImGui::Checkbox("All Layers", &gShowAllArrayLayers);
+				ImGui::SameLine();
+				ImGui::Checkbox("Matrix", &gShowLayerMipMatrix);
+			}
+			ImGui::PopStyleVar();
+			ImGui::PopItemWidth();
+		}
+
+		ImGui::PopStyleVar();
+		ImGui::PopItemWidth();
+		ImGui::End();
+	}
+
+        // (Globals declared earlier) gShowAllMipsUnified / gShowAllArrayLayers used below.
+
+		// After control window: optional mip chain strip for texture arrays.
+		        // Unified slice cache for layer/mip previews.
+			struct SlicePreview { int Layer; int Mip; uint TexID; int W; int H; };
+
+				auto GetOrCreateSliceTex = [&](int layer, int mip, uint& outTexID, int& w, int& h)->bool
+				{
+					// Ensure cache still belongs to current image and filename.
+					if (CurrImage && (gSliceCacheImage != CurrImage || (!gSliceCacheImageFilename.IsEmpty() && !CurrImage->Filename.IsEmpty() && !gSliceCacheImageFilename.IsEqualCI(CurrImage->Filename))))
+					{
+						ClearSliceCache();
+						gSliceCacheImage = CurrImage;
+						gSliceCacheImageFilename = CurrImage->Filename;
+					}
+					if (!gSliceCacheImage && CurrImage)
+					{
+						gSliceCacheImage = CurrImage;
+						gSliceCacheImageFilename = CurrImage->Filename;
+					}
+					for (auto& s : gSliceCache)
+					{
+						if (s.Layer == layer && s.Mip == mip)
+						{ outTexID = s.TexID; w = s.W; h = s.H; return true; }
+					}
+					SlicePixelCacheEntry* pix = FindSlicePixels(layer, mip);
+					if (!pix)
+						pix = DecodeAndCacheSlice(CurrImage, layer, mip);
+					if (!pix || !pix->Pixels || pix->W <= 0 || pix->H <= 0)
+						return false;
+					glGenTextures(1, &outTexID);
+					glBindTexture(GL_TEXTURE_2D, outTexID);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+					glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pix->W, pix->H, 0, GL_RGBA, GL_UNSIGNED_BYTE, pix->Pixels);
+					gSliceCache.push_back({ layer, mip, outTexID, pix->W, pix->H });
+					outTexID = gSliceCache.back().TexID; w = pix->W; h = pix->H;
+					return true;
+				};
+
+		        // Mip Chain strip (single layer across all mips).
+				if (CurrImage && (CurrImage->GetMultiFrameType() == Image::MultiFrameType::TextureArray) && CurrImage->GetNumMipLevels() > 1 && gShowAllMipsUnified && !gShowLayerMipMatrix)
+				{
+					ImGui::Begin("Mip Chain", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
+					ImGui::Text("Mip Chain (Layer %d of %d)", CurrImage->GetCurrentArrayLayer()+1, CurrImage->GetNumArrayLayers());
+					ImGui::BeginChild("##MipChainScroll", ImVec2(800, 170), true, ImGuiWindowFlags_HorizontalScrollbar);
+					ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12,4));
+					int currentLayer = CurrImage->GetCurrentArrayLayer();
+					for (int m = 0; m < CurrImage->GetNumMipLevels(); m++)
+					{
+						uint texID=0; int w=0; int h=0;
+						if (GetOrCreateSliceTex(currentLayer, m, texID, w, h))
+						{
+							ImGui::BeginGroup();
+							ImGui::Text("%d", m+1);
+							float maxH = 128.0f; float scale = (h>0)? (maxH/float(h)) : 1.0f;
+							ImGui::Image((ImTextureID)(intptr_t)texID, ImVec2(w*scale, h*scale));
+							if (ImGui::IsItemClicked()) CurrImage->SetMipLevel(m);
+							ImGui::EndGroup();
+							ImGui::SameLine();
+						}
+					}
+					ImGui::PopStyleVar();
+					ImGui::EndChild();
+					ImGui::End();
+				}
+
+		        // Array Layers grid (single mip across all layers) if not in matrix mode.
+				if (CurrImage && (CurrImage->GetMultiFrameType() == Image::MultiFrameType::TextureArray) && CurrImage->GetNumArrayLayers() > 1 && gShowAllArrayLayers && !gShowLayerMipMatrix)
+				{
+					ImGui::Begin("Array Layers", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
+					int targetMip = CurrImage->GetCurrentMipLevel();
+					ImGui::Text("All Layers (Mip %d/%d)", targetMip+1, CurrImage->GetNumMipLevels());
+					ImGui::BeginChild("##ArrayLayersScroll", ImVec2(800, 300), true, ImGuiWindowFlags_HorizontalScrollbar);
+					ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8,8));
+					// Estimate columns.
+					int w0=0,h0=0; uint dummy=0; GetOrCreateSliceTex(0, targetMip, dummy, w0, h0);
+					float maxH = 96.0f; float scaledW = (h0>0)? (w0 * (maxH/float(h0))) : float(w0);
+					int cols = tMath::tClamp(int( (800.0f) / tMath::tMax(1.0f, scaledW+20.0f) ), 1, 32);
+					int col=0;
+					for (int layer=0; layer<CurrImage->GetNumArrayLayers(); layer++)
+					{
+						uint texID=0; int w=0; int h=0;
+						if (GetOrCreateSliceTex(layer, targetMip, texID, w, h))
+						{
+							ImGui::BeginGroup(); ImGui::Text("L%d", layer+1);
+							float scale = (h>0)? (maxH/float(h)) : 1.0f;
+							ImGui::Image((ImTextureID)(intptr_t)texID, ImVec2(w*scale, h*scale));
+							if (ImGui::IsItemClicked()) CurrImage->SetArrayLayer(layer);
+							ImGui::EndGroup();
+							col++; if (col<cols) ImGui::SameLine(); else col=0;
+						}
+					}
+					ImGui::PopStyleVar();
+					ImGui::EndChild();
+					ImGui::End();
+				}
+
+		        // Matrix view: all layers * all mips.
+		        if (CurrImage && (CurrImage->GetMultiFrameType() == Image::MultiFrameType::TextureArray) && gShowLayerMipMatrix)
+		        {
+		            ImGui::Begin("Layer/Mip Matrix", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar);
+		            int numLayers = CurrImage->GetNumArrayLayers();
+		            int numMips   = CurrImage->GetNumMipLevels();
+		            if (ImGui::BeginMenuBar())
+		            {
+		                ImGui::Text("Layers:%d Mips:%d", numLayers, numMips);
+		                ImGui::EndMenuBar();
+		            }
+		            ImGui::BeginChild("##MatrixScroll", ImVec2(1000, 500), true, ImGuiWindowFlags_HorizontalScrollbar);
+		            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6,6));
+		            float cellMaxH = 100.0f;
+		            for (int layer=0; layer<numLayers; layer++)
+		            {
+		                for (int mip=0; mip<numMips; mip++)
+		                {
+		                    uint texID=0; int w=0; int h=0;
+		                    if (GetOrCreateSliceTex(layer, mip, texID, w, h))
+		                    {
+		                        ImGui::BeginGroup();
+		                        ImGui::Text("L%d M%d", layer+1, mip+1);
+		                        float scale = (h>0)? (cellMaxH/float(h)) : 1.0f;
+		                        ImGui::Image((ImTextureID)(intptr_t)texID, ImVec2(w*scale, h*scale));
+		                        if (ImGui::IsItemClicked()) { CurrImage->SetArrayLayer(layer); CurrImage->SetMipLevel(mip); }
+		                        ImGui::EndGroup();
+		                    }
+		                    ImGui::SameLine();
+		                }
+		                ImGui::NewLine();
+		            }
+		            ImGui::PopStyleVar();
+		            ImGui::EndChild();
+		            ImGui::End();
+		        }
+
+		        // Basic cache trimming.
+			if (gSliceCache.size() > 2048)
+		        {
+		            // Simple heuristic: keep only current layer row + current mip column.
+		            int keepLayer = CurrImage ? CurrImage->GetCurrentArrayLayer() : -1;
+		            int keepMip   = CurrImage ? CurrImage->GetCurrentMipLevel() : -1;
+					for (int i=0; i<gSliceCache.size(); )
+		            {
+						if (!(gSliceCache[i].Layer == keepLayer || gSliceCache[i].Mip == keepMip))
+		                {
+							glDeleteTextures(1, &gSliceCache[i].TexID);
+							gSliceCache.erase(gSliceCache.begin()+i);
+		                    continue;
+		                }
+		                i++;
+		            }
+		        }
 
 	float mainButtonImgDim	= Gutil::GetUIParamScaled(26.0f, 2.5f);
 	float mainButtonHSpace	= Gutil::GetUIParamScaled(8.0f, 2.5f);

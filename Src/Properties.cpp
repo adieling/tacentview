@@ -22,6 +22,9 @@
 using namespace tMath;
 using namespace tImage;
 
+// Globals from TacentView.cpp controlling unified preview behaviour.
+namespace Viewer { extern bool gShowAllMipsUnified; extern bool gShowAllArrayLayers; extern bool gShowLayerMipMatrix; }
+
 
 namespace Viewer
 {
@@ -33,16 +36,40 @@ namespace Viewer
 bool Viewer::DoMultiSurface(float itemWidth)
 {
 	bool anyDraw = false;
-	bool altMipmapsPicAvail = CurrImage->IsAltMipmapsPictureAvail() && !CropMode;
+	// Unified handling: For texture arrays we do not enable AltPicture; we toggle a global flag (declared in TacentView.cpp).
+
+	bool isTextureArray = (CurrImage->GetMultiFrameType() == Image::MultiFrameType::TextureArray);
+	bool altMipmapsPicAvail = CurrImage->IsAltMipmapsPictureAvail() && !CropMode; // For non-arrays (legacy side-by-side).
 	bool altMipmapsPicEnabl = altMipmapsPicAvail && CurrImage->IsAltPictureEnabled();
-	if (altMipmapsPicAvail)
+	if (isTextureArray && (CurrImage->GetNumMipLevels() > 1))
+	{
+		if (ImGui::Checkbox("Display All Mipmaps", &gShowAllMipsUnified))
+		{
+			// When switching off unified view ensure AltPicture disabled if it was somehow on.
+			if (!gShowAllMipsUnified && CurrImage->IsAltPictureEnabled())
+			{
+				CurrImage->EnableAltPicture(false);
+				CurrImage->Bind();
+			}
+		}
+		Gutil::ToolTip("Show a separate Mip Chain window with all mip levels of the current array layer.");
+		anyDraw = true;
+	        if (CurrImage->GetNumArrayLayers() > 1)
+	        {
+	            if (ImGui::Checkbox("Display All Layers", &gShowAllArrayLayers)) { }
+	            Gutil::ToolTip("Show a grid of all array layers am aktuellen Mip.");
+	            if (ImGui::Checkbox("Layer/Mip Matrix", &gShowLayerMipMatrix)) { }
+	            Gutil::ToolTip("Zeigt alle Layer *und* alle Mip Levels als Matrix.");
+	        }
+	}
+	else if (altMipmapsPicAvail)
 	{
 		if (ImGui::Checkbox("Display All Mipmaps", &altMipmapsPicEnabl))
 		{
 			CurrImage->EnableAltPicture(altMipmapsPicEnabl);
 			CurrImage->Bind();
 		}
-		Gutil::ToolTip("Display all mipmaps in a single image.");
+		Gutil::ToolTip("Display all mipmaps in a single side-by-side image.");
 		anyDraw = true;
 	}
 
