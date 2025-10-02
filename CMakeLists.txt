@@ -48,24 +48,40 @@ message(STATUS "Viewer -- InstallPrefix ${CMAKE_INSTALL_PREFIX}")
 
 include(FetchContent)
 
-# Grab the Tacent library from github at configure time. Set desired options here first.
+# Optionally use the locally vendored tacent sources under _deps instead of fetching from Git.
+set(_LOCAL_TACENT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_deps/tacent-src")
+if (EXISTS "${_LOCAL_TACENT_PATH}/CMakeLists.txt")
+	option(USE_LOCAL_TACENT "Use vendored tacent sources in _deps instead of FetchContent." ON)
+else()
+	set(USE_LOCAL_TACENT OFF)
+endif()
+
 if (CMAKE_SYSTEM_NAME MATCHES Windows)
 	option(TACENT_UTF16_API_CALLS "Build Tacent With UTF16 API Calls" On)
 endif()
 
-# See https://cmake.org/cmake/help/latest/guide/using-dependencies/index.html#fetchcontent-and-find-package-integration
-# for how FIND_PACKAGE_ARGS allows FetchContent_MakeAvailable to try find_package() first.
-FetchContent_Declare(
-	tacent
-	GIT_REPOSITORY https://github.com/bluescan/tacent.git
-	# GIT_TAG 87560bf127fa5d01cd0f62e151d103235fdcfc2d
-	# GIT_TAG v0.8.18
-	FIND_PACKAGE_ARGS NAMES tacent
-)
-FetchContent_MakeAvailable(tacent)
+if (USE_LOCAL_TACENT)
+	message(STATUS "Viewer -- Using local tacent sources at ${_LOCAL_TACENT_PATH}")
+	# Build tacent directly.
+	add_subdirectory("${_LOCAL_TACENT_PATH}" _deps/tacent-build)
+	# Mirror FetchContent variables for downstream uniformity.
+	set(tacent_POPULATED TRUE)
+	set(tacent_SOURCE_DIR "${_LOCAL_TACENT_PATH}")
+	set(tacent_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/tacent-build")
+else()
+	message(STATUS "Viewer -- Fetching tacent from remote repository.")
+	FetchContent_Declare(
+		tacent
+		GIT_REPOSITORY https://github.com/bluescan/tacent.git
+		# GIT_TAG 87560bf127fa5d01cd0f62e151d103235fdcfc2d
+		# GIT_TAG v0.8.18
+		FIND_PACKAGE_ARGS NAMES tacent
+	)
+	FetchContent_MakeAvailable(tacent)
+	# After this call you can use variables tacent_POPULATED (a bool), tacent_BINARY_DIR, and tacent_SOURCE_DIR
+	FetchContent_GetProperties(tacent)
+endif()
 
-# After this call you can use variables tacent_POPULATED (a bool), tacent_BINARY_DIR, and tacent_SOURCE_DIR
-FetchContent_GetProperties(tacent)
 message(STATUS "Viewer -- tacent_POPULATED: ${tacent_POPULATED}")
 message(STATUS "Viewer -- tacent_BINARY_DIR: ${tacent_BINARY_DIR}")
 message(STATUS "Viewer -- tacent_SOURCE_DIR: ${tacent_SOURCE_DIR}")
