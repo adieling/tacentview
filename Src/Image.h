@@ -143,7 +143,6 @@ public:
 	// modifying the current displayed Picture list. Caller takes ownership of
 	// returned pixel buffer and must delete[] it. Returns false on failure.
 	bool GetArrayLayerMipPixels(int arrayLayer, int mipLevel, tPixel4b*& outPixels, int& outWidth, int& outHeight);
-	void ApplyArrayLayerOverlay();
 
 	bool IsOpaque() const;
 	bool Unload(bool force = false);

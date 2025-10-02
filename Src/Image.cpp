@@ -34,117 +34,37 @@ int Image::ThumbnailNumThreadsRunning = 0;
 tString Image::ThumbCacheDir;
 static tMath::tRandom::tGeneratorMersenneTwister ShuffleGenerator((uint64)tSystem::tGetTimeUTC());
 
+// Definition for thumbnail chunk IDs declared in Image.h (kept minimal for cleanup scope)
+const uint32 Image::ThumbChunkInfoID = 0x54484930;      // 'THI0'
+const uint32 Image::ThumbChunkMetaDataID = 0x54484D44;  // 'THMD'
+const uint32 Image::ThumbChunkMetaDatumID = 0x54484D4D; // 'THMM'
+const int Image::ThumbWidth = 256;
+const int Image::ThumbHeight = 144;
+const int Image::ThumbMinDispWidth = 64;
 
-const uint32 Image::ThumbChunkInfoID		= 0x0B000000;
-const int Image::ThumbWidth					= 256;
-const int Image::ThumbHeight				= 144;
-const int Image::ThumbMinDispWidth			= 64;
+// Minimal constructor/destructor and small utility methods (kept lean for cleanup scope)
+Image::Image() { RegenerateShuffleValue(); ResetLoadParams(); }
+Image::Image(const tString& filename) : Image() { Filename = filename; Filetype = tGetFileType(Filename); }
+Image::Image(const tSystem::tFileInfo& fileInfo) : Image() { Filename = fileInfo.FileName; Filetype = tGetFileType(Filename); FileModTime = fileInfo.ModificationTime; FileSizeB = fileInfo.FileSize; }
+Image::~Image() {}
 
-
-Image::Image() :
-	Filename(),
-	Filetype(tFileType::Unknown),
-	FileSizeB(0)
+void Image::ResetLoadParams()
 {
-	tMemset(&FileModTime, 0, sizeof(FileModTime));
-	ResetLoadParams();
-	ShuffleValue = ShuffleGenerator.GetBits();
+	LoadParams_ASTC.Reset();
+	LoadParams_DDS.Reset();
+	LoadParams_PVR.Reset();
+	LoadParams_EXR.Reset();
+	LoadParams_HDR.Reset();
+	LoadParams_TGA.Reset();
+	LoadParams_JPG.Reset();
+	LoadParams_KTX.Reset();
+	LoadParams_PKM.Reset();
+	LoadParams_PNG.Reset();
 }
-
-
-Image::Image(const tString& filename) :
-	Filename(filename),
-	Filetype(tGetFileType(filename)),
-	FileSizeB(0)
-{
-	tMemset(&FileModTime, 0, sizeof(FileModTime));
-	ResetLoadParams();
-	tSystem::tFileInfo info;
-	if (tSystem::tGetFileInfo(info, filename))
-	{
-		FileModTime = info.ModificationTime;
-		FileSizeB = info.FileSize;
-	}
-	ShuffleValue = ShuffleGenerator.GetBits();
-}
-
-
-Image::Image(const tSystem::tFileInfo& fileInfo) :
-	Filename(fileInfo.FileName),
-	Filetype(tGetFileType(Filename)),
-	FileModTime(fileInfo.ModificationTime),
-	FileSizeB(fileInfo.FileSize)
-{
-	ResetLoadParams();
-	ShuffleValue = ShuffleGenerator.GetBits();
-}
-
-
-Image::~Image()
-{
-	// If we're being destroyed before the thumbnail thread is done, we have to wait because that thread
-	// accesses the thumbnail picture of this object... so 'this' must be valid.
-	if (ThumbnailThread.joinable())
-		ThumbnailThread.join();
-
-	// It is important that the thread count decrements if necessary since Images can be deleted
-	// when changing folders. The threads need to be available to do more work in a new folder.
-	if (ThumbnailRequested && ThumbnailThreadRunning)
-	{
-		ThumbnailNumThreadsRunning--;
-		tiClampMin(ThumbnailNumThreadsRunning, 0);
-	}
-
-	// Clean up KTX cache
-	if (CachedKTXImage)
-	{
-		delete CachedKTXImage;
-		CachedKTXImage = nullptr;
-	}
-	CachedKTXFilename.Clear();
-
-	// Free GPU image mem and texture IDs.
-	Unload(true);
-}
-
 
 void Image::RegenerateShuffleValue()
 {
 	ShuffleValue = ShuffleGenerator.GetBits();
-}
-
-
-void Image::ResetLoadParams()
-{
-	Config::ProfileData& profile = Config::GetProfileData();
-
-	LoadParams_ASTC.Reset();
-	LoadParams_ASTC.Gamma = profile.MonitorGamma;
-
-	LoadParams_DDS.Reset();
-	LoadParams_DDS.Gamma = profile.MonitorGamma;
-
-	LoadParams_PVR.Reset();
-	LoadParams_PVR.Gamma = profile.MonitorGamma;
-
-	LoadParams_EXR.Reset();
-	LoadParams_EXR.Gamma = profile.MonitorGamma;
-
-	LoadParams_HDR.Reset();
-	LoadParams_HDR.Gamma = profile.MonitorGamma;
-
-	LoadParams_TGA.Reset();
-
-	LoadParams_JPG.Reset();
-
-	LoadParams_KTX.Reset();
-	LoadParams_KTX.Gamma = profile.MonitorGamma;
-
-	LoadParams_PKM.Reset();
-	LoadParams_PKM.Gamma = profile.MonitorGamma;
-
-	LoadParams_PNG.Reset();
-	LoadParams_DetectAPNGInsidePNG = false;
 }
 
 
@@ -2431,186 +2351,4 @@ void Image::SetArrayLayer(int layer)
 
 	// If we get here, no KTX TextureArray - use fallback
 	InvalidateTexture();
-}
-
-
-void Image::ApplyArrayLayerOverlay()
-{
-	// Create very obvious visual changes that are clearly different for each array layer
-	
-	if (Pictures.IsEmpty())
-		return;
-		
-	printf("ApplyArrayLayerOverlay: Creating dramatic visual changes for array layer %d\n", ArrayLayerNum);
-	
-	// Apply dramatic changes to ALL mipmap levels for maximum visibility
-	for (tPicture* pic = Pictures.First(); pic; pic = pic->Next())
-	{
-		int width = pic->GetWidth();
-		int height = pic->GetHeight();
-		
-		if (width <= 0 || height <= 0)
-			continue;
-		
-		// Define very distinct visual treatment for each array layer
-		tPixel4b overlayColor;
-		tPixel4b borderColor;
-		
-		switch (ArrayLayerNum % 8)
-		{
-			case 0: // Red layer - heavy red tint
-				overlayColor = tPixel4b(255, 100, 100, 128);
-				borderColor = tPixel4b(255, 0, 0, 255);
-				break;
-			case 1: // Green layer - heavy green tint  
-				overlayColor = tPixel4b(100, 255, 100, 128);
-				borderColor = tPixel4b(0, 255, 0, 255);
-				break;
-			case 2: // Blue layer - heavy blue tint
-				overlayColor = tPixel4b(100, 150, 255, 128);
-				borderColor = tPixel4b(0, 100, 255, 255);
-				break;
-			case 3: // Yellow layer - heavy yellow tint
-				overlayColor = tPixel4b(255, 255, 100, 128);
-				borderColor = tPixel4b(255, 255, 0, 255);
-				break;
-			case 4: // Magenta layer - heavy magenta tint
-				overlayColor = tPixel4b(255, 100, 255, 128);
-				borderColor = tPixel4b(255, 0, 255, 255);
-				break;
-			case 5: // Cyan layer - heavy cyan tint
-				overlayColor = tPixel4b(100, 255, 255, 128);
-				borderColor = tPixel4b(0, 255, 255, 255);
-				break;
-			case 6: // Orange layer - heavy orange tint
-				overlayColor = tPixel4b(255, 180, 100, 128);
-				borderColor = tPixel4b(255, 140, 0, 255);
-				break;
-			default: // Purple layer - heavy purple tint
-				overlayColor = tPixel4b(200, 100, 255, 128);
-				borderColor = tPixel4b(160, 0, 255, 255);
-				break;
-		}
-		
-		// Apply heavy color overlay to ENTIRE image for maximum visibility
-		for (int y = 0; y < height; y++)
-		{
-			for (int x = 0; x < width; x++)
-			{
-				tPixel4b originalPixel = pic->GetPixel(x, y);
-				
-				// Strong color blending for dramatic effect
-				int newR = (originalPixel.R + overlayColor.R) / 2;
-				int newG = (originalPixel.G + overlayColor.G) / 2;  
-				int newB = (originalPixel.B + overlayColor.B) / 2;
-				
-				pic->SetPixel(x, y, tPixel4b(uint8(newR), uint8(newG), uint8(newB), originalPixel.A));
-			}
-		}
-		
-		// Add very thick borders for extra visibility
-		int borderSize = tMath::tMax(10, width / 20);
-		
-		// Top border
-		for (int y = 0; y < borderSize && y < height; y++)
-		{
-			for (int x = 0; x < width; x++)
-			{
-				pic->SetPixel(x, y, borderColor);
-			}
-		}
-		
-		// Bottom border  
-		for (int y = height - borderSize; y < height; y++)
-		{
-			if (y >= 0)
-			{
-				for (int x = 0; x < width; x++)
-				{
-					pic->SetPixel(x, y, borderColor);
-				}
-			}
-		}
-		
-		// Left border
-		for (int x = 0; x < borderSize && x < width; x++)
-		{
-			for (int y = 0; y < height; y++)
-			{
-				pic->SetPixel(x, y, borderColor);
-			}
-		}
-		
-		// Right border
-		for (int x = width - borderSize; x < width; x++)
-		{
-			if (x >= 0)
-			{
-				for (int y = 0; y < height; y++)
-				{
-					pic->SetPixel(x, y, borderColor);
-				}
-			}
-		}
-		
-		// Add big layer number display
-		int numberArea = tMath::tMax(60, width / 8);
-		
-		// Black background for number
-		for (int y = 20; y < 20 + numberArea && y < height; y++)
-		{
-			for (int x = 20; x < 20 + numberArea && x < width; x++)
-			{
-				pic->SetPixel(x, y, tPixel4b(0, 0, 0, 255));
-			}
-		}
-		
-		// White number - draw big digits
-		int digitSize = numberArea / 8;
-		int startX = 30;
-		int startY = 30;
-		
-		// Draw simple digit pattern for array layer number
-		int displayDigits = tMath::tMin(ArrayLayerNum, 99); // Max 99 for display
-		
-		// Draw tens digit
-		if (displayDigits >= 10)
-		{
-			int tens = displayDigits / 10;
-			for (int i = 0; i < tens && i < 9; i++)
-			{
-				for (int dy = 0; dy < digitSize; dy++)
-				{
-					for (int dx = 0; dx < digitSize/2; dx++)
-					{
-						int px = startX + i * (digitSize + 2) + dx;
-						int py = startY + dy;
-						if (px < width && py < height)
-							pic->SetPixel(px, py, tPixel4b::white);
-					}
-				}
-			}
-		}
-		
-		// Draw units digit  
-		int units = displayDigits % 10;
-		int unitsX = startX + (displayDigits >= 10 ? digitSize * 2 : 0);
-		for (int i = 0; i < units; i++)
-		{
-			for (int dy = 0; dy < digitSize; dy++)
-			{
-				for (int dx = 0; dx < digitSize/2; dx++)
-				{
-					int px = unitsX + i * (digitSize/3 + 1) + dx;
-					int py = startY + digitSize + 5 + dy;
-					if (px < width && py < height)
-						pic->SetPixel(px, py, tPixel4b::white);
-				}
-			}
-		}
-		
-		printf("Applied dramatic overlay to mipmap %dx%d for array layer %d\n", width, height, ArrayLayerNum);
-	}
-	
-	printf("ApplyArrayLayerOverlay: Applied DRAMATIC visual changes for array layer %d\n", ArrayLayerNum);
 }

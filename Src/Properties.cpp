@@ -22,7 +22,7 @@
 using namespace tMath;
 using namespace tImage;
 
-// Globals from TacentView.cpp controlling unified preview behaviour.
+// Unified preview globals (all-mips/all-layers/matrix) restored for overview windows.
 namespace Viewer { extern bool gShowAllMipsUnified; extern bool gShowAllArrayLayers; extern bool gShowLayerMipMatrix; }
 
 
@@ -36,33 +36,27 @@ namespace Viewer
 bool Viewer::DoMultiSurface(float itemWidth)
 {
 	bool anyDraw = false;
-	// Unified handling: For texture arrays we do not enable AltPicture; we toggle a global flag (declared in TacentView.cpp).
 
 	bool isTextureArray = (CurrImage->GetMultiFrameType() == Image::MultiFrameType::TextureArray);
-	bool altMipmapsPicAvail = CurrImage->IsAltMipmapsPictureAvail() && !CropMode; // For non-arrays (legacy side-by-side).
-	bool altMipmapsPicEnabl = altMipmapsPicAvail && CurrImage->IsAltPictureEnabled();
-	if (isTextureArray && (CurrImage->GetNumMipLevels() > 1))
+
+	// Texture arrays: Offer unified overview toggles.
+	if (isTextureArray && CurrImage->GetNumMipLevels() > 1)
 	{
-		if (ImGui::Checkbox("Display All Mipmaps", &gShowAllMipsUnified))
+		if (ImGui::Checkbox("Display All Mipmaps", &gShowAllMipsUnified)) { }
+		Gutil::ToolTip("Show a Mip Chain overview window."); anyDraw = true;
+		if (CurrImage->GetNumArrayLayers() > 1)
 		{
-			// When switching off unified view ensure AltPicture disabled if it was somehow on.
-			if (!gShowAllMipsUnified && CurrImage->IsAltPictureEnabled())
-			{
-				CurrImage->EnableAltPicture(false);
-				CurrImage->Bind();
-			}
+			if (ImGui::Checkbox("Display All Layers", &gShowAllArrayLayers)) { }
+			Gutil::ToolTip("Show all array layers at current mip.");
+			if (ImGui::Checkbox("Layer/Mip Matrix", &gShowLayerMipMatrix)) { }
+			Gutil::ToolTip("Show a matrix of all layers and mips.");
 		}
-		Gutil::ToolTip("Show a separate Mip Chain window with all mip levels of the current array layer.");
-		anyDraw = true;
-	        if (CurrImage->GetNumArrayLayers() > 1)
-	        {
-	            if (ImGui::Checkbox("Display All Layers", &gShowAllArrayLayers)) { }
-	            Gutil::ToolTip("Show a grid of all array layers am aktuellen Mip.");
-	            if (ImGui::Checkbox("Layer/Mip Matrix", &gShowLayerMipMatrix)) { }
-	            Gutil::ToolTip("Zeigt alle Layer *und* alle Mip Levels als Matrix.");
-	        }
 	}
-	else if (altMipmapsPicAvail)
+
+	// Legacy alt-mipmaps side-by-side only for non-array images.
+	bool altMipmapsPicAvail = !isTextureArray && CurrImage->IsAltMipmapsPictureAvail() && !CropMode;
+	bool altMipmapsPicEnabl = altMipmapsPicAvail && CurrImage->IsAltPictureEnabled();
+	if (altMipmapsPicAvail)
 	{
 		if (ImGui::Checkbox("Display All Mipmaps", &altMipmapsPicEnabl))
 		{
