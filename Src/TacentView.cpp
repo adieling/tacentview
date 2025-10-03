@@ -3580,10 +3580,26 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 		profile.ShowFrameScrubber && CurrImage && (CurrImage->GetNumFrames() > 1) && !CurrImage->IsAltPictureEnabled()
 	)
 	{
-		float scrubOffset = Gutil::GetUIParamScaled(34.0f, 2.5f);
-		ImGui::SetNextWindowPos(tVector2(0.0f, float(topUIHeight) + float(workAreaH) - scrubOffset));
+		// Render as HUD overlay (no saved settings/focus). Avoid docking-specific API for compatibility.
+		// Positioniere den Scrubber “unter” der Button-Reihe (näher an unten).
+		float buttonHeightOffset = Gutil::GetUIParamScaled(62.0f, 2.5f);
+		float gapBelowButtons    = ImGui::GetStyle().ItemSpacing.y * 2.00f; // deutlich weiter nach unten schieben
+		float yPos               = float(topUIHeight) + float(workAreaH) - (buttonHeightOffset - gapBelowButtons);
+		// Clamp nahe an den unteren Rand, damit es nicht aus dem Bildschirm rutscht.
+		{
+			float bottomY = float(topUIHeight) + float(workAreaH);
+			float minBottomMargin = ImGui::GetStyle().ItemSpacing.y * 0.5f;
+			if (yPos > bottomY - minBottomMargin)
+				yPos = bottomY - minBottomMargin;
+		}
+		ImGui::SetNextWindowPos(tVector2(0.0f, yPos));
 		ImGui::SetNextWindowSize(tVector2(float(workAreaW), 0.0f), ImGuiCond_Always);
-        ImGui::Begin("Scrubber", nullptr, flagsImgButton);
+		ImGuiWindowFlags flagsHUD = flagsImgButton | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing;
+	// Schlanke Ränder/Polsterung, damit die Leiste weiter unten reinpasst.
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, tVector2(4.0f, 2.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, tVector2(ImGui::GetStyle().ItemSpacing.x, ImGui::GetStyle().ItemSpacing.y * 0.6f));
+		ImGui::Begin("##Scrubber", nullptr, flagsHUD);
 
 		// Display multi-frame type information - Frame scrubber always shows mipmaps
 		const char* frameTypeText = "Frame";
@@ -3599,7 +3615,7 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 		}
 
 		// Layout:  Label | < | [ Slider ] | >   all on one line with consistent sizing.
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(5.0f, 1.0f));
         const float lineStartX = ImGui::GetCursorPosX();
         const float labelWidth = ImGui::CalcTextSize(frameTypeText).x;
         const float buttonSize = ImGui::GetFrameHeight() * 1.15f; // square-ish buttons
@@ -3638,8 +3654,9 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
             OnNextImageFrame(true);
         if (!canGoNext) ImGui::EndDisabled();
 
-        ImGui::PopStyleVar();
+		ImGui::PopStyleVar(); // FramePadding
 		ImGui::End();
+		ImGui::PopStyleVar(3); // WindowBorderSize, WindowPadding, ItemSpacing
 	}
 
 	// Array Layer Scrubber (separate from frame scrubber for texture arrays/volumes)
@@ -3653,15 +3670,31 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 		CurrImage->GetNumArrayLayers() > 1
 	)
 	{
-		float scrubOffset = Gutil::GetUIParamScaled(96.0f, 2.5f);  // Increased height for two stacked sliders
-		ImGui::SetNextWindowPos(tVector2(0.0f, float(topUIHeight) + float(workAreaH) - scrubOffset));
+		// Render as HUD overlay (no saved settings/focus). Avoid docking-specific API for compatibility.
+		// Ebenfalls unter die Button-Reihe setzen. Bei 2 Zeilen (Layer/Mip) etwas mehr Abstand lassen.
+		float buttonHeightOffset = Gutil::GetUIParamScaled(62.0f, 2.5f);
+		float extraRowReserve    = ImGui::GetFrameHeightWithSpacing();  // Platz für zweite Zeile
+		float gapBelowButtons    = ImGui::GetStyle().ItemSpacing.y * 9.0f; // deutlich weiter nach unten schieben
+		float yPos               = float(topUIHeight) + float(workAreaH) - (buttonHeightOffset - gapBelowButtons) + extraRowReserve * 0.50f;
+		// Clamp nahe an den unteren Rand, damit es nicht aus dem Bildschirm rutscht.
+		{
+			float bottomY = float(topUIHeight) + float(workAreaH);
+			float minBottomMargin = ImGui::GetStyle().ItemSpacing.y * 0.5f;
+			if (yPos > bottomY - minBottomMargin)
+				yPos = bottomY - minBottomMargin;
+		}
+		ImGui::SetNextWindowPos(tVector2(0.0f, yPos));
 		ImGui::SetNextWindowSize(tVector2(float(workAreaW), 0.0f), ImGuiCond_Always);
-		ImGui::Begin("ArrayScrubber", nullptr, flagsImgButton);
+		ImGuiWindowFlags flagsHUD = flagsImgButton | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing;
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, tVector2(4.0f, 2.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, tVector2(ImGui::GetStyle().ItemSpacing.x, ImGui::GetStyle().ItemSpacing.y * 0.6f));
+		ImGui::Begin("##ArrayScrubber", nullptr, flagsHUD);
 
 		// Unified two-row layout: Row 1 = array/volume layer, Row 2 = mip (if present).
-        const char* layerTypeText = (CurrImage->GetMultiFrameType() == Image::MultiFrameType::Volume3D) ? "Volume Slice" : "Array Layer";
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
-        float fullAvail = ImGui::GetContentRegionAvail().x;
+		const char* layerTypeText = (CurrImage->GetMultiFrameType() == Image::MultiFrameType::Volume3D) ? "Volume Slice" : "Array Layer";
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(5.0f, 1.0f));
+		float fullAvail = ImGui::GetContentRegionAvail().x;
         const float spacing = ImGui::GetStyle().ItemSpacing.x;
         const float buttonSize = ImGui::GetFrameHeight() * 1.15f;
 
@@ -3708,9 +3741,9 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
             });
 
         // Row 2: Mip (if any), with a little vertical spacing.
-        if (CurrImage->GetNumMipLevels() > 1)
+		if (CurrImage->GetNumMipLevels() > 1)
         {
-            ImGui::Dummy(tVector2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.65f));
+			ImGui::Dummy(tVector2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.35f));
             DrawRow("Mip", CurrImage->GetCurrentMipLevel()+1, CurrImage->GetNumMipLevels(), "PrevMip", "MipSlider", "NextMip",
                 [&](int new1Based)
                 {
@@ -3721,8 +3754,9 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
                 });
         }
 
-        ImGui::PopStyleVar();
+		ImGui::PopStyleVar(); // FramePadding
 		ImGui::End();
+		ImGui::PopStyleVar(3); // WindowBorderSize, WindowPadding, ItemSpacing
 	}
 
 		// Overview windows (Mip Chain, Array Layers, Matrix) shown outside of this scrubber.
