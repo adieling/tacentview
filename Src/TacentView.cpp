@@ -3583,7 +3583,7 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 		float scrubOffset = Gutil::GetUIParamScaled(34.0f, 2.5f);
 		ImGui::SetNextWindowPos(tVector2(0.0f, float(topUIHeight) + float(workAreaH) - scrubOffset));
 		ImGui::SetNextWindowSize(tVector2(float(workAreaW), 0.0f), ImGuiCond_Always);
-		ImGui::Begin("Scrubber", nullptr, flagsImgButton);
+        ImGui::Begin("Scrubber", nullptr, flagsImgButton);
 
 		// Display multi-frame type information - Frame scrubber always shows mipmaps
 		const char* frameTypeText = "Frame";
@@ -3598,48 +3598,47 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 			default:									frameTypeText = "Frame"; break;
 		}
 
-		// Show frame type and navigation buttons
-		ImGui::Text("%s:", frameTypeText);
-		ImGui::SameLine();
-		
-		// Previous frame button
-		bool canGoPrev = CurrImage->FrameNum > 0;
-		if (!canGoPrev) ImGui::BeginDisabled();
-		if (ImGui::Button("<##PrevFrame"))
-		{
-			OnNextImageFrame(false);
-		}
-		if (!canGoPrev) ImGui::EndDisabled();
-		ImGui::SameLine();
-		
-		// Frame slider
-		ImGui::PushItemWidth(-200);  // Leave space for buttons
-		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
-		int frmNum = CurrImage->FrameNum + 1;
-		if (ImGui::SliderInt("##ScrubberSlider", &frmNum, 1, CurrImage->GetNumFrames(), "%d", ImGuiSliderFlags_ClampOnInput))
-		{
-			int oldFrame = CurrImage->FrameNum;
-			tMath::tiClamp(frmNum, 1, CurrImage->GetNumFrames());
-			CurrImage->FrameNum = frmNum-1;
-			
-			// Debug output for slider
-			printf("Slider Navigation: %s %d -> %d (Total: %d)\n", 
-				frameTypeText, oldFrame + 1, CurrImage->FrameNum + 1, CurrImage->GetNumFrames());
-		}
-		skipUpdatePlaying = ImGui::IsItemActive();
-		ImGui::SameLine();
-		
-		// Next frame button
-		bool canGoNext = CurrImage->FrameNum < CurrImage->GetNumFrames() - 1;
-		if (!canGoNext) ImGui::BeginDisabled();
-		if (ImGui::Button(">##NextFrame"))
-		{
-			OnNextImageFrame(true);
-		}
-		if (!canGoNext) ImGui::EndDisabled();
+		// Layout:  Label | < | [ Slider ] | >   all on one line with consistent sizing.
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
+        const float lineStartX = ImGui::GetCursorPosX();
+        const float labelWidth = ImGui::CalcTextSize(frameTypeText).x;
+        const float buttonSize = ImGui::GetFrameHeight() * 1.15f; // square-ish buttons
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        float avail = ImGui::GetContentRegionAvail().x;
+        // Slider width is remaining after label + 2 buttons + spacing between each element (4 spacings).
+        float sliderWidth = avail - labelWidth - (buttonSize*2.0f) - spacing*4.0f;
+        if (sliderWidth < 50.0f) sliderWidth = 50.0f; // safety
 
-		ImGui::PopStyleVar();		// Pop E
-		ImGui::PopItemWidth();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(frameTypeText); ImGui::SameLine(0.0f, spacing);
+
+        bool canGoPrev = CurrImage->FrameNum > 0;
+        if (!canGoPrev) ImGui::BeginDisabled();
+        if (ImGui::Button("<##PrevFrame", tVector2(buttonSize, 0.0f)))
+            OnNextImageFrame(false);
+        if (!canGoPrev) ImGui::EndDisabled();
+        ImGui::SameLine(0.0f, spacing);
+
+        ImGui::SetNextItemWidth(sliderWidth);
+        int frmNum = CurrImage->FrameNum + 1;
+        if (ImGui::SliderInt("##ScrubberSlider", &frmNum, 1, CurrImage->GetNumFrames(), "%d", ImGuiSliderFlags_ClampOnInput))
+        {
+            int oldFrame = CurrImage->FrameNum;
+            tMath::tiClamp(frmNum, 1, CurrImage->GetNumFrames());
+            CurrImage->FrameNum = frmNum - 1;
+            // Keep or remove debug print? Keep for now – easy to grep.
+            printf("Slider Navigation: %s %d -> %d (Total: %d)\n", frameTypeText, oldFrame + 1, CurrImage->FrameNum + 1, CurrImage->GetNumFrames());
+        }
+        skipUpdatePlaying = ImGui::IsItemActive();
+        ImGui::SameLine(0.0f, spacing);
+
+        bool canGoNext = CurrImage->FrameNum < CurrImage->GetNumFrames() - 1;
+        if (!canGoNext) ImGui::BeginDisabled();
+        if (ImGui::Button(">##NextFrame", tVector2(buttonSize, 0.0f)))
+            OnNextImageFrame(true);
+        if (!canGoNext) ImGui::EndDisabled();
+
+        ImGui::PopStyleVar();
 		ImGui::End();
 	}
 
@@ -3659,79 +3658,70 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 		ImGui::SetNextWindowSize(tVector2(float(workAreaW), 0.0f), ImGuiCond_Always);
 		ImGui::Begin("ArrayScrubber", nullptr, flagsImgButton);
 
-		// Array layer type text
-		const char* layerTypeText = (CurrImage->GetMultiFrameType() == Image::MultiFrameType::Volume3D) ? "Volume Slice" : "Array Layer";
-		
-		ImGui::Text("%s:", layerTypeText);
-		ImGui::SameLine();
-		
-		// Previous layer button
-		bool canGoPrevLayer = CurrImage->GetCurrentArrayLayer() > 0;
-		if (!canGoPrevLayer) ImGui::BeginDisabled();
-		if (ImGui::Button("<##PrevLayer"))
-		{
-			OnNextArrayLayer(false);
-		}
-		if (!canGoPrevLayer) ImGui::EndDisabled();
-		ImGui::SameLine();
-		
-		// Array layer slider
-		ImGui::PushItemWidth(-200);  // Leave space for buttons (layer row)
-		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
-		int layerNum = CurrImage->GetCurrentArrayLayer() + 1;
-		if (ImGui::SliderInt("##ArrayScrubberSlider", &layerNum, 1, CurrImage->GetNumArrayLayers(), "%d", ImGuiSliderFlags_ClampOnInput))
-		{
-			int oldLayer = CurrImage->GetCurrentArrayLayer();
-			tMath::tiClamp(layerNum, 1, CurrImage->GetNumArrayLayers());
-			CurrImage->SetArrayLayer(layerNum - 1);
-			if (oldLayer != CurrImage->GetCurrentArrayLayer())
-				ClearAllPreviewThumbs();
-			
-			// Debug output for array layer slider
-			printf("Array Layer Navigation: %s %d -> %d (Total: %d)\n", 
-				layerTypeText, oldLayer + 1, CurrImage->GetCurrentArrayLayer() + 1, CurrImage->GetNumArrayLayers());
-		}
-		ImGui::SameLine();
-		
-		// Next layer button
-		bool canGoNextLayer = CurrImage->GetCurrentArrayLayer() < CurrImage->GetNumArrayLayers() - 1;
-		if (!canGoNextLayer) ImGui::BeginDisabled();
-		if (ImGui::Button(">##NextLayer"))
-		{
-			OnNextArrayLayer(true);
-		}
-		if (!canGoNextLayer) ImGui::EndDisabled();
+		// Unified two-row layout: Row 1 = array/volume layer, Row 2 = mip (if present).
+        const char* layerTypeText = (CurrImage->GetMultiFrameType() == Image::MultiFrameType::Volume3D) ? "Volume Slice" : "Array Layer";
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tVector2(7.0f, 2.0f));
+        float fullAvail = ImGui::GetContentRegionAvail().x;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float buttonSize = ImGui::GetFrameHeight() * 1.15f;
 
-		// New line for mip slider row below layer slider.
-		if (CurrImage->GetNumMipLevels() > 1)
-		{
-			ImGui::NewLine();
-			ImGui::Separator();
-			ImGui::Text("Mip:"); ImGui::SameLine();
-			bool canPrevMip = CurrImage->GetCurrentMipLevel() > 0;
-			if (!canPrevMip) ImGui::BeginDisabled();
-			if (ImGui::Button("<##PrevMip")) { CurrImage->SetMipLevel(CurrImage->GetCurrentMipLevel()-1); ClearAllPreviewThumbs(); }
-			if (!canPrevMip) ImGui::EndDisabled();
-			ImGui::SameLine();
-			int mipNum = CurrImage->GetCurrentMipLevel()+1;
-			ImGui::PushItemWidth(-200); // Match style of array slider (fill remaining width minus buttons)
-			if (ImGui::SliderInt("##MipSlider", &mipNum, 1, CurrImage->GetNumMipLevels(), "%d", ImGuiSliderFlags_ClampOnInput))
-			{
-				int oldMip = CurrImage->GetCurrentMipLevel();
-				if (mipNum < 1) mipNum = 1; if (mipNum > CurrImage->GetNumMipLevels()) mipNum = CurrImage->GetNumMipLevels();
-				CurrImage->SetMipLevel(mipNum-1);
-				if (oldMip != CurrImage->GetCurrentMipLevel()) ClearAllPreviewThumbs();
-			}
-			ImGui::PopItemWidth();
-			ImGui::SameLine();
-			bool canNextMip = CurrImage->GetCurrentMipLevel() < CurrImage->GetNumMipLevels()-1;
-			if (!canNextMip) ImGui::BeginDisabled();
-			if (ImGui::Button(">##NextMip")) { CurrImage->SetMipLevel(CurrImage->GetCurrentMipLevel()+1); ClearAllPreviewThumbs(); }
-			if (!canNextMip) ImGui::EndDisabled();
-		}
+        auto DrawRow = [&](const char* label, int currentVal1Based, int max1Based, const char* idBasePrev, const char* idBaseSlider, const char* idBaseNext, auto onChange)
+        {
+            float labelWidth = ImGui::CalcTextSize(label).x;
+            float sliderWidth = fullAvail - labelWidth - (buttonSize*2.0f) - spacing*4.0f;
+            if (sliderWidth < 50.0f) sliderWidth = 50.0f;
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(label); ImGui::SameLine(0.0f, spacing);
+            bool canPrev = currentVal1Based > 1;
+            if (!canPrev) ImGui::BeginDisabled();
+			char prevLabel[64]; std::snprintf(prevLabel, sizeof(prevLabel), "<##%s", idBasePrev);
+			if (ImGui::Button(prevLabel, tVector2(buttonSize, 0.0f)))
+                onChange(currentVal1Based - 1);
+            if (!canPrev) ImGui::EndDisabled();
+            ImGui::SameLine(0.0f, spacing);
+            ImGui::SetNextItemWidth(sliderWidth);
+            int val = currentVal1Based;
+			char sliderID[64]; std::snprintf(sliderID, sizeof(sliderID), "##%s", idBaseSlider);
+			if (ImGui::SliderInt(sliderID, &val, 1, max1Based, "%d", ImGuiSliderFlags_ClampOnInput))
+            {
+                if (val < 1) val = 1; if (val > max1Based) val = max1Based;
+                if (val != currentVal1Based)
+                    onChange(val);
+            }
+            ImGui::SameLine(0.0f, spacing);
+            bool canNext = currentVal1Based < max1Based;
+            if (!canNext) ImGui::BeginDisabled();
+			char nextLabel[64]; std::snprintf(nextLabel, sizeof(nextLabel), ">##%s", idBaseNext);
+			if (ImGui::Button(nextLabel, tVector2(buttonSize, 0.0f)))
+                onChange(currentVal1Based + 1);
+            if (!canNext) ImGui::EndDisabled();
+        };
 
-		ImGui::PopStyleVar();
-		ImGui::PopItemWidth();
+        // Row 1: Layer/Slice.
+        DrawRow(layerTypeText, CurrImage->GetCurrentArrayLayer()+1, CurrImage->GetNumArrayLayers(), "PrevLayer", "ArrayScrubberSlider", "NextLayer",
+            [&](int new1Based)
+            {
+                int old = CurrImage->GetCurrentArrayLayer();
+                CurrImage->SetArrayLayer(new1Based-1);
+                if (old != CurrImage->GetCurrentArrayLayer())
+                    ClearAllPreviewThumbs();
+            });
+
+        // Row 2: Mip (if any), with a little vertical spacing.
+        if (CurrImage->GetNumMipLevels() > 1)
+        {
+            ImGui::Dummy(tVector2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.65f));
+            DrawRow("Mip", CurrImage->GetCurrentMipLevel()+1, CurrImage->GetNumMipLevels(), "PrevMip", "MipSlider", "NextMip",
+                [&](int new1Based)
+                {
+                    int old = CurrImage->GetCurrentMipLevel();
+                    CurrImage->SetMipLevel(new1Based-1);
+                    if (old != CurrImage->GetCurrentMipLevel())
+                        ClearAllPreviewThumbs();
+                });
+        }
+
+        ImGui::PopStyleVar();
 		ImGui::End();
 	}
 
@@ -3756,18 +3746,25 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 				{
 					float availW = ImGui::GetContentRegionAvail().x;
 					float spacing = ImGui::GetStyle().ItemSpacing.x;
-					int count = 0; int largestW = 0; for (auto& th : MipThumbs) if (th.TexID) { count++; largestW = tMath::tMax(largestW, th.W); }
-					if (count > 0 && largestW > 0)
+					// Count valid mip thumbs and gather max dimensions per mip.
+					int count = 0; for (auto& th : MipThumbs) if (th.TexID) count++;
+					if (count > 0)
 					{
-						float maxPer = (availW - spacing * float(count - 1)) / float(count);
-						if (maxPer < 1.0f) maxPer = 1.0f;
-						float scaleAll = tMath::tMin(1.0f, maxPer / float(largestW));
+						// Uniform target cell size based on available width.
+						float maxCell = 160.0f; // Upper limit.
+						float cell = (availW - spacing * float(count - 1)) / float(count);
+						if (cell > maxCell) cell = maxCell;
+						if (cell < 32.0f) cell = 32.0f; // Minimum so it remains visible.
+
 						float cursorX = 0.0f;
 						for (auto& th : MipThumbs)
 						{
 							if (!th.TexID) continue;
-							int dispW = int(float(th.W) * scaleAll);
-							int dispH = int(float(th.H) * scaleAll);
+							int maxDim = tMath::tMax(th.W, th.H); if (maxDim <= 0) maxDim = 1;
+							float scale = cell / float(maxDim);
+							int dispW = int(float(th.W) * scale);
+							int dispH = int(float(th.H) * scale);
+							// Wrap if needed (should rarely wrap because cell computed to fit one row unless clamped by maxCell).
 							if (cursorX + dispW > availW && cursorX > 0.0f)
 							{
 								cursorX = 0.0f; ImGui::NewLine();
@@ -3775,11 +3772,13 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 							ImGui::PushID(th.Mip);
 							if (ImGui::ImageButton(ImTextureID(th.TexID), tVector2(float(dispW), float(dispH))))
 							{
-								CurrImage->SetMipLevel(th.Mip);
-								ClearAllPreviewThumbs();
+								CurrImage->SetMipLevel(th.Mip); ClearAllPreviewThumbs();
 							}
 							if (ImGui::IsItemHovered())
-								ImGui::SetTooltip("Mip %d", th.Mip+1);
+							{
+								float scaleFactor = scale;
+								ImGui::SetTooltip("Mip %d  %dx%d  scale %.2fx", th.Mip+1, th.W, th.H, scaleFactor);
+							}
 							ImGui::PopID();
 							ImGui::SameLine(); cursorX += dispW + spacing;
 						}
@@ -3828,17 +3827,18 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 				{
 					int layers = CurrImage->GetNumArrayLayers();
 					int mips = CurrImage->GetNumMipLevels();
-					// Compute uniform scale so matrix fits horizontally.
-					int largestW = 0; for (auto& th : MatrixThumbs) if (th.TexID) largestW = tMath::tMax(largestW, th.W);
 					float availW = ImGui::GetContentRegionAvail().x;
 					float spacing = ImGui::GetStyle().ItemSpacing.x;
-					float scaleAll = 1.0f;
-					if (largestW > 0)
-					{
-						float maxPer = (availW - spacing * float(mips - 1)) / float(mips);
-						if (maxPer < 1.0f) maxPer = 1.0f;
-						scaleAll = tMath::tMin(1.0f, maxPer / float(largestW));
-					}
+					// Determine a uniform target cell dimension to fit all mips in one row (per layer) if possible.
+					float cell = (availW - spacing * float(mips - 1)) / float(mips);
+					const float maxCell = 128.0f;
+					if (cell > maxCell) cell = maxCell;
+					if (cell < 32.0f) cell = 32.0f; // Minimum visibility.
+					ImDrawList* dl = ImGui::GetWindowDrawList();
+					ImU32 colActive = ImGui::GetColorU32(ImVec4(0.95f, 0.55f, 0.15f, 1.0f));
+					ImU32 colInactive = ImGui::GetColorU32(ImVec4(0.25f, 0.25f, 0.30f, 0.6f));
+					float activeThickness = 3.0f;
+					float inactiveThickness = 1.0f;
 					for (int l = 0; l < layers; l++)
 					{
 						for (int m = 0; m < mips; m++)
@@ -3854,15 +3854,20 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
 								continue;
 							}
 							ImGui::PushID((l<<16)|m);
-							float scale = scaleAll;
+							int maxDim = tMath::tMax(thPtr->W, thPtr->H); if (maxDim <= 0) maxDim = 1;
+							float scale = cell / float(maxDim);
 							int dispW = int(float(thPtr->W) * scale);
 							int dispH = int(float(thPtr->H) * scale);
 							if (ImGui::ImageButton(ImTextureID(thPtr->TexID), tVector2(float(dispW), float(dispH))))
 							{
 								CurrImage->SetArrayLayer(l); CurrImage->SetMipLevel(m); ClearAllPreviewThumbs();
 							}
+							bool isActive = (l == CurrImage->GetCurrentArrayLayer() && m == CurrImage->GetCurrentMipLevel());
+							ImVec2 rmin = ImGui::GetItemRectMin();
+							ImVec2 rmax = ImGui::GetItemRectMax();
+							dl->AddRect(rmin, rmax, isActive ? colActive : colInactive, 0.0f, 0, isActive ? activeThickness : inactiveThickness);
 							if (ImGui::IsItemHovered())
-								ImGui::SetTooltip("Layer %d, Mip %d", l+1, m+1);
+								ImGui::SetTooltip("L%d M%d  %dx%d  scale %.2fx", l+1, m+1, thPtr->W, thPtr->H, scale);
 							ImGui::PopID();
 							ImGui::SameLine();
 						}
