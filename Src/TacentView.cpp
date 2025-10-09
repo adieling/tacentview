@@ -3707,14 +3707,14 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
             ImGui::TextUnformatted(label); ImGui::SameLine(0.0f, spacing);
             bool canPrev = currentVal1Based > 1;
             if (!canPrev) ImGui::BeginDisabled();
-			char prevLabel[64]; std::snprintf(prevLabel, sizeof(prevLabel), "<##%s", idBasePrev);
+			char prevLabel[64];
 			if (ImGui::Button(prevLabel, tVector2(buttonSize, 0.0f)))
                 onChange(currentVal1Based - 1);
             if (!canPrev) ImGui::EndDisabled();
             ImGui::SameLine(0.0f, spacing);
             ImGui::SetNextItemWidth(sliderWidth);
             int val = currentVal1Based;
-			char sliderID[64]; std::snprintf(sliderID, sizeof(sliderID), "##%s", idBaseSlider);
+			char sliderID[64];
 			if (ImGui::SliderInt(sliderID, &val, 1, max1Based, "%d", ImGuiSliderFlags_ClampOnInput))
             {
                 if (val < 1) val = 1; if (val > max1Based) val = max1Based;
@@ -3724,7 +3724,7 @@ void Viewer::Update(GLFWwindow* window, double dt, bool dopoll)
             ImGui::SameLine(0.0f, spacing);
             bool canNext = currentVal1Based < max1Based;
             if (!canNext) ImGui::BeginDisabled();
-			char nextLabel[64]; std::snprintf(nextLabel, sizeof(nextLabel), ">##%s", idBaseNext);
+			char nextLabel[64];
 			if (ImGui::Button(nextLabel, tVector2(buttonSize, 0.0f)))
                 onChange(currentVal1Based + 1);
             if (!canNext) ImGui::EndDisabled();
